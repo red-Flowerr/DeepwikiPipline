@@ -12,10 +12,9 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from Deepwiki_pipline.deepwiki_mcp_client import (
+from deepwiki_pipeline import (
     MCPError,
     Session,
-    build_number_lookup,
     call_tool,
     delete_session,
     extract_text_blocks,
@@ -55,10 +54,7 @@ def main() -> None:
     parser.add_argument("repo", help="Repository name, e.g. NVIDIA/Megatron-LM")
     parser.add_argument(
         "--page",
-        help=(
-            "Page title or outline number to fetch. "
-            "If omitted, the first top-level page is used."
-        ),
+        help="Page title to fetch. If omitted, the first top-level page is used.",
     )
     parser.add_argument(
         "--section",
@@ -73,11 +69,9 @@ def main() -> None:
     try:
         session = initialize_session()
         outline_nodes = fetch_outline(args.repo, session)
-        number_lookup = build_number_lookup(outline_nodes)
-
         target_page = args.page or outline_nodes[0].title
         pages = fetch_contents(args.repo, session)
-        page = resolve_page(pages, target_page, number_lookup=number_lookup)
+        page = resolve_page(pages, target_page)
 
         if args.section:
             section = page.section_text(args.section)
@@ -105,7 +99,7 @@ if __name__ == "__main__":
 # python fetch_wiki_chunk.py NVIDIA/Megatron-LM
 
 # # 指定大纲编号 2.1
-# python fetch_wiki_chunk.py volcengine/verl --page 1.1
+# python fetch_wiki_chunk.py volcengine/verl --page 12.1
 
 # # 指定页面标题并只取某个小节
 # python fetch_wiki_chunk.py NVIDIA/Megatron-LM --page "Training System" --section "Monitoring and

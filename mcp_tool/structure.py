@@ -1,27 +1,43 @@
 #!/usr/bin/env python3
-"""Fetch the DeepWiki outline for NVIDIA/Megatron-LM via MCP."""
+"""Fetch the DeepWiki outline for a repository via MCP."""
 
-from Deepwiki_pipline.scripts.deepwiki_mcp_client import (
-    Session,
-    initialize_session,
-    call_tool,
-    extract_text_blocks,
-    delete_session,
+from __future__ import annotations
+
+import argparse
+
+from deepwiki_pipeline import (
     MCPError,
+    Session,
+    call_tool,
+    delete_session,
+    extract_text_blocks,
+    initialize_session,
 )
 
-REPO = "NVIDIA/Megatron-LM"
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Call the read_wiki_structure MCP tool for a repository.",
+    )
+    parser.add_argument("repo", help="Repository identifier, e.g. volcengine/verl.")
+    parser.add_argument(
+        "--repo-commit",
+        dest="repo_commit",
+        default=None,
+        help="Optional commit hash/tag supported by DeepWiki.",
+    )
+    return parser.parse_args()
 
 
 def main() -> None:
+    args = _parse_args()
     session: Session | None = None
     try:
         session = initialize_session()
-        response = call_tool(
-            session,
-            "read_wiki_structure",
-            {"repoName": REPO},
-        )
+        payload = {"repoName": args.repo}
+        if args.repo_commit:
+            payload["repoCommit"] = args.repo_commit
+        response = call_tool(session, "read_wiki_structure", payload)
         outline_chunks = extract_text_blocks(response)
         if not outline_chunks:
             raise MCPError("read_wiki_structure returned no textual content.")

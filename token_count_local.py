@@ -26,10 +26,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Count tokens for narratives using a local Hugging Face tokenizer."
     )
-    parser.add_argument(
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument(
         "--json_path",
         type=Path,
         help="Path to the narrative JSON file (e.g. result_data/megatron_narratives.json).",
+    )
+    input_group.add_argument(
+        "--text_path",
+        type=Path,
+        help="Path to a plain text file (entire file treated as a single entry).",
     )
     parser.add_argument(
         "--key",
@@ -53,7 +59,11 @@ def main() -> None:
     print(f"[info] Loading tokenizer from {args.tokenizer_path}")
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_path, use_fast=True)
 
-    texts = load_texts(args.json_path, args.key)
+    if args.json_path:
+        texts = load_texts(args.json_path, args.key)
+    else:
+        texts = [args.text_path.read_text(encoding="utf-8")]
+
     counts: list[int] = []
     for idx, text in enumerate(texts):
         # import pdb; pdb.set_trace()
