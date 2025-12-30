@@ -31,6 +31,16 @@ pipeline v1 经过多轮迭代，目前具备以下能力：
    - `deepwiki_pipeline/data_clean` 提供 URL/HTML 清洗脚本，防止脏数据进入改写流程。  
    - CLI 可在执行中将中间结果写入文本或 JSON，断点续跑时可直接接续生成。  
    - 其他工具如 `token_count_local.py`、`hydrate_sections.py` 方便统计 token、离线水化或调试。
+7. **Post-train 质量验证导出**  
+   - CLI 支持 `--post-train-output` 将每个章节打包为 conversation（system/user/assistant），可直接送入后训练/评测流程。  
+   - conversation 自动包含 narrative、critic 以及代码引用，便于构建参考答案和快速判分。
+8. **SFT 指令对生成**  
+   - 开启 `--qa-use-vllm` 可在 Narrative 基础上自动生成多类型 QA（概念/用法/约束），并通过 `--sft-output` 导出标准的 instruction-response 样本。  
+   - 若不启用 QA LLM，也会回落为“解释类”指令对，`narrative` 即为高质量答案。
+   - 默认系统 Prompt 位于 `prompts/sft_qa_system.txt`，用户模板位于 `prompts/sft_qa_user.txt`，可分别通过 `--qa-system-prompt @<path>`、`--qa-user-prompt @<path>` 自定义。
+9. **码元 SFT 构造**  
+   - `--code-explain-output` 自动生成【代码 → 设计解读】指令对，默认指令模板 `prompts/code_explain_instruction.txt`。  
+   - `--code-gen-output` 自动生成【设计描述 → 代码】指令对，默认指令模板 `prompts/code_generate_instruction.txt`，无需额外 LLM。
 
 # Case
 Tencent/ncnn  99ecca
@@ -42,6 +52,15 @@ python deepwiki_mcp_client.py \
   --repo-commit 809ae5 \
   --output result_data/verl_deepwiki.txt \
   --output-format text \
+  --post-train-output result_data/verl_post_train.jsonl \
+  --sft-output result_data/verl_sft.jsonl \
+  --code-explain-output result_data/verl_code_explain.jsonl \
+  --code-gen-output result_data/verl_code_generate.jsonl \
+  --qa-use-vllm \
+  --qa-vllm-server-url http://[fdbd:dccd:cdd2:2101::1c4]:8000/v1/chat/completions \
+  --qa-vllm-model gpt-oss-20b \
+  --qa-system-prompt @prompts/sft_qa_system.txt \
+  --qa-user-prompt @prompts/sft_qa_user.txt \
   --narrative-output result_data/verl_narratives.json \
   --narrative-format json \
   --narrative-modes code critic \
@@ -61,6 +80,30 @@ python deepwiki_mcp_client.py \
 python utils/merge_narrative_code.py \
   --input result_data/verl_narratives.json \
   --output result_data/verl_narratives_merged.txt
+# 导出 SFT instruction-response（自动生成 QA）
+python deepwiki_mcp_client.py \
+  --generate-dataset volcengine/verl \
+  --repo-commit 809ae5 \
+  --qa-use-vllm \
+  --qa-vllm-model gpt-oss-20b \
+  --qa-system-prompt @prompts/sft_qa_system.txt \
+  --qa-user-prompt @prompts/sft_qa_user.txt \
+  --sft-output result_data/verl_sft.jsonl
+# 导出 Code Explanation 指令对
+python deepwiki_mcp_client.py \
+  --generate-dataset volcengine/verl \
+  --repo-commit 809ae5 \
+  --code-explain-output result_data/verl_code_explain.jsonl
+# 导出 Code Generation 指令对
+python deepwiki_mcp_client.py \
+  --generate-dataset volcengine/verl \
+  --repo-commit 809ae5 \
+  --code-gen-output result_data/verl_code_generate.jsonl
+# 导出 Post-train conversation（可直接投喂 SFT/RL 评测）
+python deepwiki_mcp_client.py \
+  --generate-dataset volcengine/verl \
+  --repo-commit 809ae5 \
+  --post-train-output result_data/verl_post_train.jsonl
 # 处理原始deepwiki脚本
 python mcp_tool/hydrate_sections.py volcengine/verl \
   --repo-commit 809ae5 \

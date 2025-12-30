@@ -178,6 +178,25 @@ class CodeReference:
 
 
 @dataclass
+class InstructionPair:
+    instruction: str
+    output: str
+    input: str = ""
+    category: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "instruction": self.instruction,
+            "output": self.output,
+        }
+        if self.input:
+            payload["input"] = self.input
+        if self.category:
+            payload["category"] = self.category
+        return payload
+
+
+@dataclass
 class BlockResult:
     index: int
     rewrite: str
@@ -216,6 +235,7 @@ class SubsectionResult:
     critic_history: List[str]
     code_blocks: List[CodeReference] = field(default_factory=list)
     original_context: str = ""
+    instruction_pairs: List[InstructionPair] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -230,6 +250,7 @@ class SubsectionResult:
             "critic_history": list(self.critic_history),
             "code_blocks": [block.to_dict() for block in self.code_blocks],
             "original_context": self.original_context,
+            "instruction_pairs": [item.to_dict() for item in self.instruction_pairs],
         }
 
 

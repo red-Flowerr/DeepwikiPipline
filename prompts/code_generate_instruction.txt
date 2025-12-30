@@ -1,0 +1,5 @@
+Using the functional and design description below, write or reconstruct a complete code implementation that:
+1. Matches the stated goals and constraints exactly;
+2. Aligns key interfaces, parameters, and data flow with the design;
+3. Can run independently or be dropped into the existing module without extra glue.
+If the description calls out performance, fault-tolerance, or resource management requirements, make sure those behaviours are explicit in the code.

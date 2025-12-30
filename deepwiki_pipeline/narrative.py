@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
-import textwrap
+from pathlib import Path
 from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
 
 from .models import (
     BlockResult,
     CriticFeedback,
+    InstructionPair,
     JudgeLLMConfig,
     MisalignmentType,
     NarrativeLLMConfig,
@@ -276,6 +278,11 @@ SECTION_CRITIC_SYSTEM_PROMPT = (
     "Critique failures where any dimension is weak, missing, or contradicted by the code. Respond with PASS or FAIL and explain issues clearly."
 )
 
+SFT_QA_SYSTEM_PROMPT_PATH = Path(__file__).resolve().parent.parent / "prompts" / "sft_qa_system.txt"
+SFT_QA_USER_PROMPT_PATH = Path(__file__).resolve().parent.parent / "prompts" / "sft_qa_user.txt"
+SFT_QA_SYSTEM_PROMPT = SFT_QA_SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
+SFT_QA_USER_PROMPT = SFT_QA_USER_PROMPT_PATH.read_text(encoding="utf-8")
+
 
 def summarise_page(
     *,
@@ -334,6 +341,128 @@ def _join_code_blocks(blocks: Sequence[SectionBlock]) -> str:
     return "\n\n".join(snippets).strip()
 
 
+def _extract_json_array(text: str) -> Optional[str]:
+    stripped = text.strip()
+    if not stripped:
+        return None
+    if stripped.startswith("```"):
+        fence_end = stripped.rfind("```")
+        if fence_end != -1:
+            inner = stripped[3:fence_end].strip()
+            if inner.startswith("json"):
+                inner = inner[4:].strip()
+            stripped = inner
+    start = stripped.find("[")
+    end = stripped.rfind("]")
+    if start != -1 and end != -1 and end >= start:
+        return stripped[start : end + 1]
+    return None
+
+
+def generate_instruction_pairs(
+    *,
+    repo: str,
+    page_title: str,
+    section_heading: str,
+    narrative: str,
+    section_text: str,
+    code_blocks: Sequence[SectionBlock],
+    llm_config: Optional[NarrativeLLMConfig],
+    system_prompt: Optional[str],
+    user_template: Optional[str],
+) -> List[InstructionPair]:
+    if not llm_config or not call_vllm_chat or not ChatMessage:
+        return []
+    code_text = _truncate(_join_code_blocks(code_blocks), 6000) if code_blocks else "(no code snippets detected)"
+    prompt_template = (user_template or SFT_QA_USER_PROMPT)
+    user_prompt = prompt_template.format(
+        repo=repo,
+        page_title=page_title,
+        section_heading=section_heading,
+        context=_truncate(section_text, 6000),
+        narrative=_truncate(narrative, 3500),
+        code_snippets=code_text,
+    )
+    system_message = (system_prompt or SFT_QA_SYSTEM_PROMPT).strip()
+    messages = [
+        ChatMessage(role="system", content=system_message),
+        ChatMessage(role="user", content=user_prompt),
+    ]
+    try:
+        response = call_vllm_chat(
+            host=llm_config.host,
+            port=llm_config.port,
+            path=llm_config.path,
+            model=llm_config.model,
+            messages=messages,
+            temperature=llm_config.temperature,
+            max_tokens=llm_config.max_tokens,
+            top_p=llm_config.top_p,
+            server_url=llm_config.server_url,
+            api_key=llm_config.api_key,
+            destination_service=llm_config.destination_service,
+            timeout=llm_config.timeout,
+            retries=llm_config.retries,
+            retry_backoff=llm_config.retry_backoff,
+        )
+    except VLLMError as exc:  # pragma: no cover - network dependent
+        logger.warning(
+            "QA generation failed for %s :: %s: %s",
+            page_title,
+            section_heading,
+            exc,
+        )
+        return []
+    payload = _extract_json_array(response) or ""
+    if not payload:
+        logger.warning(
+            "QA generation returned non-JSON payload for %s :: %s: %s",
+            page_title,
+            section_heading,
+            _truncate(response, 200),
+        )
+        return []
+    try:
+        data = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        logger.warning(
+            "QA generation JSON decode failed for %s :: %s: %s",
+            page_title,
+            section_heading,
+            exc,
+        )
+        return []
+    if not isinstance(data, list):
+        logger.warning(
+            "QA generation payload not a list for %s :: %s: %s",
+            page_title,
+            section_heading,
+            type(data),
+        )
+        return []
+    pairs: List[InstructionPair] = []
+    for idx, item in enumerate(data):
+        if not isinstance(item, dict):
+            continue
+        instruction = str(item.get("instruction") or "").strip()
+        output = str(item.get("output") or "").strip()
+        if not instruction or not output:
+            continue
+        input_text = str(item.get("input") or "").strip()
+        category = item.get("category")
+        if category:
+            category = str(category).strip()
+        pairs.append(
+            InstructionPair(
+                instruction=instruction,
+                output=output,
+                input=input_text,
+                category=category if category else None,
+            )
+        )
+    return pairs
+
+
 @dataclass
 class SectionResult:
     narrative: str
@@ -343,6 +472,7 @@ class SectionResult:
     learnability: float
     critic_history: List[str]
     code_blocks: List[SectionBlock]
+    instruction_pairs: List[InstructionPair]
 
 
 def rewrite_block(
@@ -1005,6 +1135,9 @@ def make_section_result(
     section_text: str,
     logic_config: Optional[NarrativeLLMConfig],
     critic_config: Optional[JudgeLLMConfig],
+    qa_config: Optional[NarrativeLLMConfig],
+    qa_system_prompt: Optional[str],
+    qa_user_prompt: Optional[str],
     judge_rounds: int,
 ) -> SectionResult:
     code_blocks = _extract_code_blocks(section_text)
@@ -1087,4 +1220,17 @@ def make_section_result(
         learnability=learnability,
         critic_history=critic_history,
         code_blocks=list(code_blocks),
+        instruction_pairs=generate_instruction_pairs(
+            repo=repo,
+            page_title=page_title,
+            section_heading=section_heading,
+            narrative=current_text,
+            section_text=section_text,
+            code_blocks=code_blocks,
+            llm_config=qa_config,
+            system_prompt=qa_system_prompt,
+            user_template=qa_user_prompt,
+        )
+        if qa_config
+        else [],
     )

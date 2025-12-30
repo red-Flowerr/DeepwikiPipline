@@ -7,6 +7,7 @@ import argparse
 import json
 import logging
 import sys
+import textwrap
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -225,6 +226,229 @@ def _collect_narrative_records(output: PipelineOutput) -> List[Dict[str, Any]]:
     return records
 
 
+def _collect_post_train_records(output: PipelineOutput) -> List[Dict[str, Any]]:
+    records: List[Dict[str, Any]] = []
+    system_message = (
+        "You are a senior engineer verifying internal documentation. "
+        "Respond with a cohesive design narrative that explains WHY the component exists, "
+        "HOW it delivers that functionality, and what CONTRACT or guarantees it upholds. "
+        "Write continuous prose without bullet lists or tables."
+    )
+    for idx, subsection in enumerate(output.subsections):
+        context = subsection.original_context.strip() if subsection.original_context else ""
+        if not context:
+            context = "(no hydrated context available; rely on repository knowledge)."
+        code_blocks = [
+            {"reference": block.reference, "code": block.code}
+            for block in subsection.code_blocks
+            if block.code.strip()
+        ]
+        prompt = textwrap.dedent(
+            f"""\
+            Repository: {output.repo}
+            Page: {subsection.page_title}
+            Section: {subsection.section_heading}
+
+            Context:
+            {context.strip()}
+
+            Task: Write an expert-level narrative covering the design motivation (WHY), key mechanisms (HOW), and system guarantees (CONTRACT). Reference code inline when it strengthens the explanation. Avoid lists or markdown headings.
+            """
+        ).strip()
+        narrative = subsection.narrative.strip()
+        if not narrative:
+            continue
+        record = {
+            "id": f"{normalize_heading(subsection.page_title)}::{normalize_heading(subsection.section_heading)}::{idx}",
+            "repo": output.repo,
+            "page": subsection.page_title,
+            "section": subsection.section_heading,
+            "messages": [
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": prompt},
+                {"role": "assistant", "content": narrative},
+            ],
+            "reference_narrative": narrative,
+            "reference_critic": subsection.critic.strip(),
+            "verdict": subsection.verdict,
+            "misalignment": subsection.misalignment.value if subsection.misalignment else None,
+            "learnability": subsection.learnability,
+            "critic_history": subsection.critic_history,
+            "code_blocks": code_blocks,
+            "instruction_pairs": [
+                pair.to_dict() for pair in subsection.instruction_pairs
+            ],
+        }
+        records.append(record)
+    return records
+
+
+def _render_code_context(subsection) -> str:
+    if subsection.original_context:
+        return subsection.original_context.strip()
+    parts: List[str] = []
+    for block in subsection.code_blocks:
+        code = block.code.strip()
+        if not code:
+            continue
+        reference = block.reference or "code"
+        parts.append(f"{reference}\n{code}")
+    return "\n\n".join(parts)
+
+
+def _collect_sft_records(output: PipelineOutput) -> List[Dict[str, Any]]:
+    base_instruction = (
+        "请基于下面提供的仓库上下文，解释其设计意图、关键机制以及需要遵守的约束。"
+    )
+    records: List[Dict[str, Any]] = []
+    for idx, subsection in enumerate(output.subsections):
+        context = _render_code_context(subsection)
+        metadata = {
+            "repo": output.repo,
+            "page": subsection.page_title,
+            "section": subsection.section_heading,
+            "verdict": subsection.verdict,
+            "misalignment": subsection.misalignment.value if subsection.misalignment else None,
+            "learnability": subsection.learnability,
+        }
+        code_refs = [
+            {"reference": block.reference, "code": block.code}
+            for block in subsection.code_blocks
+            if block.code.strip()
+        ]
+        if subsection.instruction_pairs:
+            for pair_index, pair in enumerate(subsection.instruction_pairs):
+                record = {
+                    "id": f"{normalize_heading(subsection.page_title)}::{normalize_heading(subsection.section_heading)}::{idx}::qa{pair_index}",
+                    "instruction": pair.instruction,
+                    "input": pair.input or context,
+                    "output": pair.output,
+                    "category": pair.category or "custom",
+                    "metadata": metadata,
+                    "critic": subsection.critic.strip(),
+                    "code_blocks": code_refs,
+                }
+                records.append(record)
+            continue
+        narrative = subsection.narrative.strip()
+        if not narrative:
+            continue
+        record = {
+            "id": f"{normalize_heading(subsection.page_title)}::{normalize_heading(subsection.section_heading)}::{idx}::explain",
+            "instruction": base_instruction,
+            "input": context,
+            "output": narrative,
+            "category": "explanation",
+            "metadata": metadata,
+            "critic": subsection.critic.strip(),
+            "code_blocks": code_refs,
+        }
+        records.append(record)
+    return records
+
+
+def _format_instruction(template: str, *, repo: str, page: str, section: str, reference: Optional[str]) -> str:
+    try:
+        return template.format(
+            repo=repo,
+            page=page,
+            section=section,
+            reference=reference or "",
+        ).strip()
+    except Exception:
+        return template.strip()
+
+
+def _collect_code_explain_records(
+    output: PipelineOutput,
+    *,
+    instruction_template: str,
+) -> List[Dict[str, Any]]:
+    records: List[Dict[str, Any]] = []
+    for idx, subsection in enumerate(output.subsections):
+        context = _render_code_context(subsection)
+        if not context:
+            continue
+        instruction = _format_instruction(
+            instruction_template,
+            repo=output.repo,
+            page=subsection.page_title,
+            section=subsection.section_heading,
+            reference=subsection.code_blocks[0].reference if subsection.code_blocks else None,
+        )
+        narrative = subsection.narrative.strip()
+        if not narrative:
+            continue
+        records.append(
+            {
+                "id": f"{normalize_heading(subsection.page_title)}::{normalize_heading(subsection.section_heading)}::{idx}::explain",
+                "instruction": instruction,
+                "input": context,
+                "output": narrative,
+                "metadata": {
+                    "repo": output.repo,
+                    "page": subsection.page_title,
+                    "section": subsection.section_heading,
+                    "verdict": subsection.verdict,
+                    "misalignment": subsection.misalignment.value if subsection.misalignment else None,
+                    "learnability": subsection.learnability,
+                },
+                "critic": subsection.critic.strip(),
+                "code_blocks": [
+                    {"reference": block.reference, "code": block.code}
+                    for block in subsection.code_blocks
+                    if block.code.strip()
+                ],
+            }
+        )
+    return records
+
+
+def _collect_code_generation_records(
+    output: PipelineOutput,
+    *,
+    instruction_template: str,
+) -> List[Dict[str, Any]]:
+    records: List[Dict[str, Any]] = []
+    for idx, subsection in enumerate(output.subsections):
+        context = _render_code_context(subsection)
+        if not context:
+            continue
+        narrative = subsection.narrative.strip()
+        if not narrative:
+            continue
+        instruction = _format_instruction(
+            instruction_template,
+            repo=output.repo,
+            page=subsection.page_title,
+            section=subsection.section_heading,
+            reference=subsection.code_blocks[0].reference if subsection.code_blocks else None,
+        )
+        records.append(
+            {
+                "id": f"{normalize_heading(subsection.page_title)}::{normalize_heading(subsection.section_heading)}::{idx}::codegen",
+                "instruction": instruction,
+                "input": narrative,
+                "output": context,
+                "metadata": {
+                    "repo": output.repo,
+                    "page": subsection.page_title,
+                    "section": subsection.section_heading,
+                    "verdict": subsection.verdict,
+                    "misalignment": subsection.misalignment.value if subsection.misalignment else None,
+                    "learnability": subsection.learnability,
+                },
+                "critic": subsection.critic.strip(),
+                "code_blocks": [
+                    {"reference": block.reference, "code": block.code}
+                    for block in subsection.code_blocks
+                    if block.code.strip()
+                ],
+            }
+        )
+    return records
+
+
 def _render_narratives_text(records: List[Dict[str, Any]], modes: List[str]) -> str:
     parts: List[str] = []
     for record in records:
@@ -270,6 +494,102 @@ def _write_narrative_output(
     logger.info("Wrote narrative output to %s", destination)
 
 
+def _write_post_train_output(
+    output: PipelineOutput,
+    *,
+    fmt: str,
+    destination: Path,
+) -> None:
+    records = _collect_post_train_records(output)
+    if not records:
+        logger.info("No post-train records to write.")
+        return
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if fmt == "json":
+        payload = json.dumps(records, ensure_ascii=False, indent=2)
+        destination.write_text(payload, encoding="utf-8")
+    else:
+        with destination.open("w", encoding="utf-8") as handle:
+            for record in records:
+                handle.write(json.dumps(record, ensure_ascii=False))
+                handle.write("\n")
+    logger.info("Wrote post-train output to %s", destination)
+
+
+def _write_sft_output(
+    output: PipelineOutput,
+    *,
+    fmt: str,
+    destination: Path,
+) -> None:
+    records = _collect_sft_records(output)
+    if not records:
+        logger.info("No SFT records to write.")
+        return
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if fmt == "json":
+        payload = json.dumps(records, ensure_ascii=False, indent=2)
+        destination.write_text(payload, encoding="utf-8")
+    else:
+        with destination.open("w", encoding="utf-8") as handle:
+            for record in records:
+                handle.write(json.dumps(record, ensure_ascii=False))
+                handle.write("\n")
+    logger.info("Wrote SFT output to %s", destination)
+
+
+def _write_code_explain_output(
+    output: PipelineOutput,
+    *,
+    fmt: str,
+    destination: Path,
+    instruction_template: str,
+) -> None:
+    records = _collect_code_explain_records(
+        output,
+        instruction_template=instruction_template,
+    )
+    if not records:
+        logger.info("No code explanation records to write.")
+        return
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if fmt == "json":
+        payload = json.dumps(records, ensure_ascii=False, indent=2)
+        destination.write_text(payload, encoding="utf-8")
+    else:
+        with destination.open("w", encoding="utf-8") as handle:
+            for record in records:
+                handle.write(json.dumps(record, ensure_ascii=False))
+                handle.write("\n")
+    logger.info("Wrote code explanation output to %s", destination)
+
+
+def _write_code_generation_output(
+    output: PipelineOutput,
+    *,
+    fmt: str,
+    destination: Path,
+    instruction_template: str,
+) -> None:
+    records = _collect_code_generation_records(
+        output,
+        instruction_template=instruction_template,
+    )
+    if not records:
+        logger.info("No code generation records to write.")
+        return
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if fmt == "json":
+        payload = json.dumps(records, ensure_ascii=False, indent=2)
+        destination.write_text(payload, encoding="utf-8")
+    else:
+        with destination.open("w", encoding="utf-8") as handle:
+            for record in records:
+                handle.write(json.dumps(record, ensure_ascii=False))
+                handle.write("\n")
+    logger.info("Wrote code generation output to %s", destination)
+
+
 def _build_design_llm_config(args: argparse.Namespace) -> NarrativeLLMConfig:
     max_tokens = args.design_vllm_max_tokens or None
     top_p = args.design_vllm_top_p or None
@@ -308,6 +628,26 @@ def _build_judge_llm_config(args: argparse.Namespace, *, system_prompt: Optional
         retries=args.judge_vllm_retries,
         retry_backoff=args.judge_vllm_retry_backoff,
         system_prompt=system_prompt,
+    )
+
+
+def _build_qa_llm_config(args: argparse.Namespace) -> NarrativeLLMConfig:
+    max_tokens = args.qa_vllm_max_tokens or None
+    top_p = args.qa_vllm_top_p or None
+    return NarrativeLLMConfig(
+        server_url=args.qa_vllm_server_url,
+        host=args.qa_vllm_host,
+        port=args.qa_vllm_port,
+        path=args.qa_vllm_path,
+        model=args.qa_vllm_model,
+        temperature=args.qa_vllm_temperature,
+        top_p=top_p,
+        max_tokens=max_tokens,
+        api_key=args.qa_vllm_api_key,
+        destination_service=args.qa_vllm_destination_service,
+        timeout=args.qa_vllm_timeout,
+        retries=args.qa_vllm_retries,
+        retry_backoff=args.qa_vllm_retry_backoff,
     )
 
 
@@ -426,6 +766,96 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="Optional path to write narrative records.",
     )
     parser.add_argument(
+        "--sft-output",
+        type=str,
+        default=None,
+        help="Optional path to write SFT instruction-response pairs.",
+    )
+    parser.add_argument(
+        "--sft-format",
+        choices=["json", "jsonl"],
+        default=None,
+        help="Serialization format for SFT output (default: jsonl).",
+    )
+    parser.add_argument(
+        "--qa-use-vllm",
+        action="store_true",
+        help="Enable dedicated vLLM generation for SFT instruction pairs.",
+    )
+    parser.add_argument("--qa-vllm-server-url", type=str, default=None)
+    parser.add_argument("--qa-vllm-host", type=str, default="127.0.0.1")
+    parser.add_argument("--qa-vllm-port", type=int, default=8000)
+    parser.add_argument("--qa-vllm-path", type=str, default="/v1/chat/completions")
+    parser.add_argument("--qa-vllm-model", type=str, default=None)
+    parser.add_argument("--qa-vllm-temperature", type=float, default=0.2)
+    parser.add_argument("--qa-vllm-top-p", type=float, default=None)
+    parser.add_argument("--qa-vllm-max-tokens", type=int, default=32768)
+    parser.add_argument("--qa-vllm-timeout", type=float, default=120.0)
+    parser.add_argument("--qa-vllm-retries", type=int, default=2)
+    parser.add_argument("--qa-vllm-retry-backoff", type=float, default=2.0)
+    parser.add_argument("--qa-vllm-api-key", type=str, default=None)
+    parser.add_argument("--qa-vllm-destination-service", type=str, default="openai")
+    parser.add_argument(
+        "--qa-system-prompt",
+        type=str,
+        default="@prompts/sft_qa_system.txt",
+        help="System prompt for generating SFT instruction pairs (prefix with @ to load from file).",
+    )
+    parser.add_argument(
+        "--qa-user-prompt",
+        type=str,
+        default="@prompts/sft_qa_user.txt",
+        help="User prompt template for SFT instruction pairs (prefix with @ to load from file).",
+    )
+    parser.add_argument(
+        "--post-train-output",
+        type=str,
+        default=None,
+        help="Optional path to write post-train conversation data for quality checks.",
+    )
+    parser.add_argument(
+        "--post-train-format",
+        choices=["json", "jsonl"],
+        default=None,
+        help="Serialization format for post-train output (default: jsonl).",
+    )
+    parser.add_argument(
+        "--code-explain-output",
+        type=str,
+        default=None,
+        help="Optional path to write code explanation SFT pairs.",
+    )
+    parser.add_argument(
+        "--code-explain-format",
+        choices=["json", "jsonl"],
+        default=None,
+        help="Serialization format for code explanation pairs (default: jsonl).",
+    )
+    parser.add_argument(
+        "--code-explain-instruction",
+        type=str,
+        default="@prompts/code_explain_instruction.txt",
+        help="Instruction template for code explanation pairs (prefix with @ to load from file).",
+    )
+    parser.add_argument(
+        "--code-gen-output",
+        type=str,
+        default=None,
+        help="Optional path to write code generation SFT pairs.",
+    )
+    parser.add_argument(
+        "--code-gen-format",
+        choices=["json", "jsonl"],
+        default=None,
+        help="Serialization format for code generation pairs (default: jsonl).",
+    )
+    parser.add_argument(
+        "--code-gen-instruction",
+        type=str,
+        default="@prompts/code_generate_instruction.txt",
+        help="Instruction template for code generation pairs (prefix with @ to load from file).",
+    )
+    parser.add_argument(
         "--max-pages",
         type=int,
         default=None,
@@ -469,6 +899,26 @@ def validate_args(args: argparse.Namespace) -> None:
         raise MCPError("--narrative-output requires --generate-dataset.")
     if args.narrative_modes and not args.narrative_output:
         raise MCPError("--narrative-modes requires --narrative-output.")
+    if args.sft_output and not args.generate_dataset:
+        raise MCPError("--sft-output requires --generate-dataset.")
+    if args.sft_format and not args.sft_output:
+        raise MCPError("--sft-format requires --sft-output.")
+    if args.code_explain_output and not args.generate_dataset:
+        raise MCPError("--code-explain-output requires --generate-dataset.")
+    if args.code_explain_format and not args.code_explain_output:
+        raise MCPError("--code-explain-format requires --code-explain-output.")
+    if args.code_gen_output and not args.generate_dataset:
+        raise MCPError("--code-gen-output requires --generate-dataset.")
+    if args.code_gen_format and not args.code_gen_output:
+        raise MCPError("--code-gen-format requires --code-gen-output.")
+    if args.qa_use_vllm and not args.generate_dataset:
+        raise MCPError("--qa-use-vllm requires --generate-dataset.")
+    if args.qa_use_vllm and not args.qa_vllm_model:
+        raise MCPError("--qa-vllm-model is required when --qa-use-vllm is set.")
+    if args.post_train_output and not args.generate_dataset:
+        raise MCPError("--post-train-output requires --generate-dataset.")
+    if args.post_train_format and not args.post_train_output:
+        raise MCPError("--post-train-format requires --post-train-output.")
     if args.judge_max_rounds < 1:
         raise MCPError("--judge-max-rounds must be >= 1.")
     if args.max_pages is not None and args.max_pages < 1:
@@ -533,6 +983,49 @@ def main(argv: Optional[List[str]] = None) -> None:
             if narrative_path
             else []
         )
+        sft_path: Optional[Path] = Path(args.sft_output) if args.sft_output else None
+        sft_format = args.sft_format or "jsonl"
+        post_train_path: Optional[Path] = (
+            Path(args.post_train_output) if args.post_train_output else None
+        )
+        post_train_format = args.post_train_format or "jsonl"
+        qa_config = _build_qa_llm_config(args) if args.qa_use_vllm else None
+        qa_system_prompt = _load_prompt(
+            args.qa_system_prompt,
+            description="QA system prompt",
+        ) if args.qa_system_prompt else None
+        qa_user_prompt = _load_prompt(
+            args.qa_user_prompt,
+            description="QA user prompt",
+        ) if args.qa_user_prompt else None
+        code_explain_path: Optional[Path] = (
+            Path(args.code_explain_output) if args.code_explain_output else None
+        )
+        code_explain_format = args.code_explain_format or "jsonl"
+        code_explain_instruction = _load_prompt(
+            args.code_explain_instruction,
+            description="Code explanation instruction",
+        ) if args.code_explain_instruction else (
+            "请阅读下方提供的仓库上下文与代码片段，用连贯的中文段落说明："
+            "1. 这段代码存在的业务/架构动机；"
+            "2. 关键的实现机制与组件协作方式；"
+            "3. 使用时必须遵守的约束、边界条件或副作用。"
+            "请保持技术准确性，避免罗列式描述，让读者能快速理解整体结构和设计原理。"
+        )
+        code_gen_path: Optional[Path] = (
+            Path(args.code_gen_output) if args.code_gen_output else None
+        )
+        code_gen_format = args.code_gen_format or "jsonl"
+        code_gen_instruction = _load_prompt(
+            args.code_gen_instruction,
+            description="Code generation instruction",
+        ) if args.code_gen_instruction else (
+            "请依据下方的功能与设计描述，编写或复现一段完整代码，保证："
+            "1. 行为与描述的目标、约束完全一致；"
+            "2. 关键接口、参数或数据流程与设计契合；"
+            "3. 代码可独立运行或易于嵌入原有模块。"
+            "如描述提及性能、容错或资源管理要求，请在实现中显式体现。"
+        )
 
         def persist_progress(partial_output: PipelineOutput) -> None:
             if dataset_path:
@@ -555,20 +1048,58 @@ def main(argv: Optional[List[str]] = None) -> None:
                     fmt=args.narrative_format,
                     destination=narrative_path,
                 )
+            if sft_path:
+                _write_sft_output(
+                    partial_output,
+                    fmt=sft_format,
+                    destination=sft_path,
+                )
+            if post_train_path:
+                _write_post_train_output(
+                    partial_output,
+                    fmt=post_train_format,
+                    destination=post_train_path,
+                )
+            if code_explain_path:
+                _write_code_explain_output(
+                    partial_output,
+                    fmt=code_explain_format,
+                    destination=code_explain_path,
+                    instruction_template=code_explain_instruction,
+                )
+            if code_gen_path:
+                _write_code_generation_output(
+                    partial_output,
+                    fmt=code_gen_format,
+                    destination=code_gen_path,
+                    instruction_template=code_gen_instruction,
+                )
 
         pipeline = DeepWikiPipeline(
             session=session,
             repo=target_repo,
             logic_llm_config=design_config,
             critic_llm_config=judge_config,
+            qa_llm_config=qa_config,
+            qa_system_prompt=qa_system_prompt,
+            qa_user_prompt=qa_user_prompt,
             repo_commit=args.repo_commit,
             judge_rounds=args.judge_max_rounds,
             max_pages=args.max_pages,
             max_sections_per_page=args.max_sections_per_page,
             max_workers=args.max_workers,
         )
-        progress_needed = dataset_path is not None or narrative_path is not None
-        
+        progress_needed = any(
+            [
+                dataset_path,
+                narrative_path,
+                sft_path,
+                post_train_path,
+                code_explain_path,
+                code_gen_path,
+            ]
+        )
+
         output = pipeline.run(
             progress_callback=persist_progress if progress_needed else None
         )
@@ -582,6 +1113,32 @@ def main(argv: Optional[List[str]] = None) -> None:
                 modes=modes,
                 fmt=args.narrative_format,
                 destination=narrative_path,
+            )
+        if sft_path:
+            _write_sft_output(
+                output,
+                fmt=sft_format,
+                destination=sft_path,
+            )
+        if post_train_path:
+            _write_post_train_output(
+                output,
+                fmt=post_train_format,
+                destination=post_train_path,
+            )
+        if code_explain_path:
+            _write_code_explain_output(
+                output,
+                fmt=code_explain_format,
+                destination=code_explain_path,
+                instruction_template=code_explain_instruction,
+            )
+        if code_gen_path:
+            _write_code_generation_output(
+                output,
+                fmt=code_gen_format,
+                destination=code_gen_path,
+                instruction_template=code_gen_instruction,
             )
 
     except MCPError as exc:

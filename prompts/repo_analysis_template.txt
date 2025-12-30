@@ -2,8 +2,8 @@ Repository: $repo
 Total instances: $total_instances
 Reproduction breakdown: $reproduction_breakdown
 Assets breakdown: $assets_breakdown
-Top modules by mention: $top_modules
-Instance IDs: $instance_ids
+Top referenced modules: $top_modules
+Related instance IDs: $instance_ids
 
 Issue summaries:
 $issue_summaries

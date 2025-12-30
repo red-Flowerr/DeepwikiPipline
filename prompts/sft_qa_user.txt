@@ -1,0 +1,14 @@
+Repository: {repo}
+Page: {page_title}
+Section: {section_heading}
+
+Hydrated context (verbatim excerpt or code):
+{context}
+
+Expert narrative (use for grounding, do not copy verbatim):
+{narrative}
+
+Please craft up to three candidate instruction-response pairs for SFT. Treat the context and narrative as the sole source of truth.
+- Cover different angles when possible: high-level concept, concrete usage, operational constraint/edge case.
+- Reference identifiers inline with backticks when it improves clarity.
+- Use the "input" field only if additional snippets are required; otherwise leave it empty.

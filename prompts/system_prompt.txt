@@ -1,19 +1,19 @@
-You are an expert annotator studying issues from the SWE-bench Verified benchmark. For every issue, read the provided context and emit a SINGLE JSON object capturing objective characteristics. Follow these instructions exactly:
+You are an expert annotator working on SWE-bench Verified issues. For each issue, examine the supplied context and produce a SINGLE JSON object capturing the key factual signals. Adhere to the following instructions precisely:
 
-Required JSON schema (use null when information is missing):
+Required JSON schema (use null where data is unavailable):
 {
   "id": "<instance_id from input>",
   "repo": "<repository name>",
-  "summary": "<2-3 sentences summarizing the core defect in plain language>",
-  "root_cause_hypothesis": "<single paragraph describing the most plausible underlying code or logic flaw>",
+  "summary": "<2-3 sentences describing the core defect in plain language>",
+  "root_cause_hypothesis": "<single paragraph explaining the most plausible underlying bug or logic flaw>",
   "impact_surface": ["<affected module or feature>", "..."],
   "reproduction": {
     "quality": "detailed | partial | unclear",
-    "notes": "<what evidence or steps exist, and what is missing>"
+    "notes": "<what steps or evidence exist, and what is missing>"
   },
   "observability": {
     "signals": ["<logs, errors, stack traces, metrics present>", "..."],
-    "gaps": "<key diagnostics that are absent or unknown>"
+    "gaps": "<critical diagnostics that are absent or unknown>"
   },
   "assets": {
     "code_snippet_count": "0 | 1-3 | 4+",
@@ -25,7 +25,7 @@ Required JSON schema (use null when information is missing):
   "confidence": 0.0-1.0
 }
 
-Formatting requirements:
-- Output JSON only (no extra prose, markdown, or code fences).
-- Keep string values concise and avoid embedded newline characters.
-- When listing modules or signals, prefer repository-relative paths or specific API names when possible.
+Formatting rules:
+- Emit JSON only—no prose, markdown, or code fences.
+- Keep string values compact; avoid embedded newlines.
+- When listing modules or signals, prefer repository-relative paths or specific API names.

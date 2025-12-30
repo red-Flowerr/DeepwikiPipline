@@ -42,6 +42,9 @@ class DeepWikiPipeline:
         repo: str,
         logic_llm_config: Optional[NarrativeLLMConfig] = None,
         critic_llm_config: Optional[JudgeLLMConfig] = None,
+        qa_llm_config: Optional[NarrativeLLMConfig] = None,
+        qa_system_prompt: Optional[str] = None,
+        qa_user_prompt: Optional[str] = None,
         *,
         repo_commit: Optional[str] = None,
         judge_rounds: int = 1,
@@ -54,6 +57,9 @@ class DeepWikiPipeline:
         self.repo = repo
         self.logic_llm_config = logic_llm_config
         self.critic_llm_config = critic_llm_config
+        self.qa_llm_config = qa_llm_config
+        self.qa_system_prompt = qa_system_prompt
+        self.qa_user_prompt = qa_user_prompt
         self.repo_commit = repo_commit
         self.judge_rounds = judge_rounds
         self.repo_root = repo_root.resolve() if repo_root else None
@@ -277,6 +283,9 @@ class DeepWikiPipeline:
                 section_text=hydrated_context,
                 logic_config=self.logic_llm_config,
                 critic_config=self.critic_llm_config,
+                qa_config=self.qa_llm_config,
+                qa_system_prompt=self.qa_system_prompt,
+                qa_user_prompt=self.qa_user_prompt,
                 judge_rounds=judge_rounds,
             )
             code_refs = [
@@ -298,6 +307,7 @@ class DeepWikiPipeline:
                 critic_history=section_result.critic_history,
                 code_blocks=code_refs,
                 original_context=hydrated_context.strip(),
+                instruction_pairs=section_result.instruction_pairs,
             )
             page_sections.append(subsection)
         if not page_sections:

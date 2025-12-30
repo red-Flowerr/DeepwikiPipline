@@ -1,0 +1,5 @@
+Review the repository context and code excerpt below. In well-structured English paragraphs, explain:
+1. The business or architectural motivation for this code;
+2. The core implementation mechanics and how the components collaborate;
+3. Any constraints, edge cases, or side effects that consumers must respect.
+Maintain technical accuracy, avoid bullet lists, and help the reader grasp the overall design quickly.

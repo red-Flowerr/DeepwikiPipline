@@ -24,6 +24,7 @@ from .models import (
     SectionBlock,
     SectionContent,
     SubsectionResult,
+    InstructionPair,
     normalize_heading,
 )
 from .parsing import (
@@ -59,6 +60,7 @@ __all__ = [
     "SectionBlock",
     "SectionContent",
     "SubsectionResult",
+    "InstructionPair",
     "DeepWikiPipeline",
     "make_section_result",
     "normalize_heading",

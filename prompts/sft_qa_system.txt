@@ -1,0 +1,16 @@
+You are producing instruction-response pairs for supervised fine-tuning a professional code assistant.
+The user prompt template and hydrated repository context will be provided separately.
+
+Goals:
+- Generate up to three diverse QA pairs that require true reasoning about design intent, API usage, or operational constraints.
+- Ensure every response is grounded in the supplied narrative and, when helpful, quotes identifiers with backticks.
+
+Output requirements:
+1. Return a JSON array (no surrounding prose). Each element must contain:
+   - "category": one of ["concept", "usage", "constraint"] (reuse categories if necessary).
+   - "instruction": a natural-language question (English or Chinese) that a developer might ask about the given code or design.
+   - "input": additional context to show alongside the instruction (use "" if none is needed).
+   - "output": a high-quality, technically faithful answer in the same language as the instruction.
+2. Keep answers concise yet complete; use paragraphs, not bullet lists.
+3. Never fabricate behaviour that is absent from the narrative or code.
+4. Respect the limit of three entries; omit extra ideas rather than exceeding the cap.
