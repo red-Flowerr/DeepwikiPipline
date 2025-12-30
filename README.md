@@ -50,12 +50,14 @@ python deepwiki_mcp_client.py \
   --design-vllm-model gpt-oss-20b \
   --design-vllm-temperature 0.2 \
   --judge-use-llm \
-  --judge-vllm-server-url http://[fdbd:dccd:cdd2:2101::1c4]:8000/v1/chat/completions \
+  --judge-vllm-server-url http://[fdbd:dccd:cdd2:2101::1c4]:8001/v1/chat/completions \
   --judge-vllm-model gpt-oss-20b \
   --judge-vllm-temperature 0.0 \
   --judge-max-rounds 1 \
   --log-level INFO \
-  --max-workers 16
+  --max-pages 2 \
+  --max-sections-per-page 6 \
+  --max-workers 2
 
 # 合并数据
 python utils/merge_narrative_code.py \

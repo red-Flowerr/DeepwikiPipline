@@ -208,73 +208,54 @@ PAGE_SUMMARY_SYSTEM_PROMPT = (
 )
 
 BLOCK_REWRITE_SYSTEM_PROMPT = (
-    "You are given a mixture of source code, documentation fragments, and system-level descriptions "
-    "extracted from a software repository.\n\n"
-    "Your task is to rewrite them into a single, coherent, natural narrative that reflects how a competent "
-    "engineer would explain the system while developing or reviewing it.\n\n"
-    "The narrative should flow naturally and implicitly follow this reasoning order:\n"
-    "- first establish the purpose, constraints, and design intent behind the code,\n"
-    "- then explain how the design is realized at a structural or algorithmic level,\n"
-    "- and only then expose the concrete implementation details through code.\n\n"
-    "Do not shorten the material. When helpful, expand the explanation with additional clarifying sentences so long as they remain faithful to the source.\n"
-    "Write in textbook-style prose: continuous sentences grouped into short paragraphs.\n"
-    "Do NOT introduce explicit section headers, labels, tables, bullet lists, ASCII diagrams, or other rigid formats.\n"
-    "Do NOT enclose material in fenced code blocks; reference code inline with backticks when necessary.\n"
-    "Do NOT turn the content into a tutorial or Q&A.\n"
-    "Do NOT invent functionality that is not present in the original materials.\n\n"
-    "When code appears, it should feel justified by the preceding explanation, as if the reader already understands "
-    "why this code must exist before seeing it.\n\n"
-    "Preserve technical accuracy, module boundaries, and dependency relationships.\n"
-    "Prefer concise but information-dense explanations over verbosity."
+    "You are reconstructing the author's thinking process at the moment this code was written.\n\n"
+    "You are given:\n"
+    "- Explanatory text from a project wiki (high-level, post-hoc descriptions)\n"
+    "- One or more related code snippets\n\n"
+    "Your task is NOT to summarize the wiki or explain how the code works.\n\n"
+    "Instead, infer and articulate the design-time reasoning that likely preceded the code:\n"
+    "- What problems or constraints the author was facing\n"
+    "- What options they likely considered and rejected\n"
+    "- What trade-offs or assumptions shaped the final structure\n"
+    "- Why this specific form was chosen over simpler or more obvious alternatives\n\n"
+    "Write from the perspective of someone about to implement the code, thinking aloud internally.\n\n"
+    "Guidelines:\n"
+    "- Do not restate wiki explanations or architecture descriptions.\n"
+    "- Do not describe the code line by line.\n"
+    "- Focus on decision-making, not outcomes.\n"
+    "- It is acceptable to make reasonable assumptions if they are implied by the code.\n"
+    "- Write in natural technical prose, as if explaining your reasoning to another senior engineer before coding.\n"
+    "- Do not use Markdown tables, bullet lists, or other rigid formatting; express trade-offs in flowing prose.\n\n"
+    "You may reference the code abstractly, and you may insert short inline comments (e.g. “at this point I realized…”) "
+    "to anchor the reasoning, but do not paste or quote large code blocks.\n\n"
+    "The output should read like a design notebook entry written before the code existed."
 )
 
 CRITIC_SYSTEM_PROMPT = (
-    "You are acting as a critical reviewer for pretraining data quality.\n\n"
-    "You will be given a text segment that may include source code.\n"
-    "Your task is to evaluate whether the segment implicitly follows a coherent reasoning flow suitable for large "
-    "language model pretraining.\n\n"
-    "Specifically, assess whether the content naturally establishes:\n"
-    "- what problem or responsibility the code addresses,\n"
-    "- how the solution is designed or structured,\n"
-    "- and how the source code concretely realizes that design.\n\n"
-    "Do NOT require explicit markers or section labels.\n"
-    "Judge only the implicit logical flow and narrative coherence.\n\n"
-    "If the segment is weak, identify exactly where and why the reasoning breaks down "
-    "(e.g. code appears without motivation, design jumps are unexplained, or intent is unclear).\n\n"
-    "Your output MUST include:\n"
-    "1. A brief verdict: PASS or FAIL\n"
-    "2. A concise critic explaining the main issue(s), written as feedback to a dataset engineer\n\n"
-    "Do NOT rewrite the content.\n"
-    "Do NOT suggest stylistic improvements unless they affect reasoning clarity.\n"
-    "Focus strictly on reasoning structure and alignment between intent, design, and code."
+    "You are evaluating whether the following text reflects genuine design-time coding reasoning.\n\n"
+    "Criteria:\n"
+    "- Does the text describe constraints, trade-offs, or uncertainties faced before implementation?\n"
+    "- Does it avoid restating documentation or explaining the finished system?\n"
+    "- Does it focus on decisions rather than describing what the code does?\n"
+    "- Does it read like a developer thinking through a problem, not teaching it?\n\n"
+    "If the text mainly:\n"
+    "- Summarizes wiki content\n"
+    "- Explains architecture after the fact\n"
+    "- Describes code behavior instead of decision rationale\n\n"
+    "Then it is misaligned.\n\n"
+    "Respond with:\n"
+    "PASS or FAIL\n\n"
+    "If FAIL, briefly explain what kind of reasoning is missing or what the text does instead."
 )
 
 REFINEMENT_REMINDER = (
-    "Preserve all portions of the existing narrative that already provide accurate context. "
-    "Only revise the specific logical gaps highlighted by the critic, keeping the text concise and engineering-focused."
+    "Keep the voice anchored in pre-implementation reasoning. Preserve lines that already capture constraints, trade-offs, "
+    "and sequencing, and revise only the gaps flagged by the critic."
 )
 
-SECTION_REWRITE_SYSTEM_PROMPT = (
-    "You are rewriting mixed technical content that includes both natural-language explanations and source code "
-    "for an experienced software engineer who needs to understand design intent, architectural choices, and runtime behavior.\n\n"
-    "Do not summarize or shorten. Preserve all technical detail and feel free to expand with inferred rationale, implicit constraints, "
-    "and operational assumptions that are only hinted at in the original materials.\n\n"
-    "Prioritise enrichment over compression: if a concept seems terse, elaborate with concrete explanations that stay faithful to the source.\n\n"
-    "Produce a design-oriented walkthrough that covers, in order, the DESIGN MOTIVATION (WHY), the DESIGN MECHANISM (HOW), "
-    "and the SYSTEM ROLE & GUARANTEES (CONTRACT). Present these sections as fluid paragraphs rather than headings or bullet lists.\n"
-    "Explicitly name each facet within the prose (e.g., \"First, the design motivation...\"), but avoid Markdown headings, numbered lists, or tables.\n\n"
-    "Write in textbook-style paragraphs. Do not output ASCII diagrams, fenced code blocks, or formatted tables. "
-    "When referencing code, quote only the indispensable identifiers or expressions inline using backticks and immediately explain their intent.\n\n"
-    "The final output must read like a cohesive narrative where explanation and code reinforce each other without relying on structural markup."
-)
+SECTION_REWRITE_SYSTEM_PROMPT = BLOCK_REWRITE_SYSTEM_PROMPT
 
-SECTION_CRITIC_SYSTEM_PROMPT = (
-    "You review a section-level narrative meant for pretraining. Judge whether it achieves:\n"
-    "- Clear DESIGN MOTIVATION (WHY) with constraints/trade-offs made explicit.\n"
-    "- Accurate DESIGN MECHANISM (HOW) with annotated code snippets that justify implementation decisions.\n"
-    "- Explicit SYSTEM ROLE & GUARANTEES explaining contracts, assumptions, and integration points.\n\n"
-    "Critique failures where any dimension is weak, missing, or contradicted by the code. Respond with PASS or FAIL and explain issues clearly."
-)
+SECTION_CRITIC_SYSTEM_PROMPT = CRITIC_SYSTEM_PROMPT
 
 
 def summarise_page(
@@ -334,6 +315,33 @@ def _join_code_blocks(blocks: Sequence[SectionBlock]) -> str:
     return "\n\n".join(snippets).strip()
 
 
+def _make_design_stub(subject: str, language: str, code: str) -> str:
+    topic = subject or f"this {language or 'code'} change"
+    snippet_hint = ""
+    first_line = ""
+    for line in code.splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            first_line = stripped
+            break
+    if first_line:
+        snippet_hint = (
+            " I'm expecting the implementation to center around "
+            f"`{first_line}` (or something close), so I need to validate the inputs and side effects it depends on."
+        )
+    return _sanitize_visible_text(
+        " ".join(
+            [
+                f"I'm about to sketch how {topic} should come together.",
+                "The surrounding system is already live, so every change has to integrate without disrupting the existing callers.",
+                "Before typing anything I want to map the hard constraints, decide what I can defer, and stage the risky pieces last.",
+                "I'm also listing the failure modes I can't afford and the checks I'll lean on to catch them early.",
+                snippet_hint.strip(),
+            ]
+        )
+    )
+
+
 @dataclass
 class SectionResult:
     narrative: str
@@ -355,14 +363,7 @@ def rewrite_block(
     llm_config: Optional[NarrativeLLMConfig],
 ) -> Tuple[str, NarrativeScaffold]:
     explanation = block.explanation.strip()
-    fallback_lines = []
-    if explanation:
-        fallback_lines.append(explanation)
-    fallback_lines.append(
-        "The code snippet below implements this behaviour:"
-    )
-    fallback_lines.append(f"```{block.language}\n{block.code}\n```")
-    fallback = _sanitize_visible_text("\n\n".join(fallback_lines).strip())
+    fallback = _make_design_stub(explanation, block.language, block.code)
     if not llm_config or not call_vllm_chat or not ChatMessage:
         scaffold = build_scaffold(fallback, block)
         return fallback, scaffold
@@ -384,8 +385,9 @@ def rewrite_block(
         {_truncate(block.code, 6000)}
         ```
 
-        Rewrite this material as textbook-style prose that preserves every technical detail and expands with any clarifying context needed for readability.
-        Do not shorten the content relative to the original notes; add concise supporting sentences when they help the reader follow the reasoning.
+        Reconstruct the author's internal reasoning immediately before implementing this block.
+        Focus on constraints, options you rejected, trade-offs, assumptions, and the order you plan to follow.
+        Do not summarise the wiki or explain the finished code. Avoid Markdown tables or bullet lists; keep everything in flowing prose.
         """
     )
     messages = [
@@ -433,10 +435,15 @@ def rewrite_section(
     section_text: str,
     code_blocks: Sequence[SectionBlock],
     llm_config: Optional[NarrativeLLMConfig],
+    fallback_subject: Optional[str] = None,
 ) -> str:
-    fallback = _sanitize_visible_text(section_text)
-    if not fallback:
-        fallback = f"{section_heading or page_title} provides implementation details; refer to the code below."
+    lead_block = code_blocks[0] if code_blocks else None
+    subject = fallback_subject or section_heading or page_title
+    fallback = _make_design_stub(
+        subject.strip() if subject else "",
+        lead_block.language if lead_block else "section",
+        lead_block.code if lead_block else "",
+    )
     if not llm_config or not call_vllm_chat or not ChatMessage:
         return fallback
     user_prompt = textwrap.dedent(
@@ -448,8 +455,9 @@ def rewrite_section(
         Hydrated section contents (original prose + code fences):
         {section_text.strip()}
 
-        Rewrite this material into a design walkthrough that follows the WHY/ HOW / CONTRACT structure described in the system prompt.
-        Integrate the essential code snippets with inline comments that explain intent and constraints, and preserve every critical technical detail.
+        Reconstruct the author's reasoning before this work existed.
+        Concentrate on constraints, discarded options, trade-offs, sequencing, and open risks. Keep it as a planning monologue.
+        Do not restate the wiki or describe completed behavior, and avoid Markdown tables or bullet lists—use flowing prose instead.
         """
     )
     messages = [
@@ -733,7 +741,7 @@ def refine_block(
         {_truncate(block.code, 6000)}
         ```
 
-        Produce an updated narrative (2-3 sentences) that resolves the critic feedback without inventing new behaviour.
+        Produce an updated design-time reasoning note that resolves the critic feedback while staying in the planning voice.
         """
     )
     messages = [
@@ -803,7 +811,7 @@ def refine_section(
         Referenced code:
         {code_text}
 
-        Produce a revised walkthrough that reinstates the WHY / HOW / CONTRACT structure, weaving in the essential code with inline comments as required by the system prompt.
+        Produce a revised design-time reasoning note that addresses the critic feedback while keeping the voice in pre-implementation planning and avoiding tables or bullet lists.
         """
     )
     messages = [
@@ -965,8 +973,27 @@ def _find_preceding_label(section_text: str, start: int) -> Optional[str]:
             candidate = candidate[2:].strip()
         if candidate.startswith("• "):
             candidate = candidate[2:].strip()
-        if _CODE_LABEL_RE.match(candidate):
-            return candidate
+        normalized = candidate
+        lowered = normalized.lower()
+        if lowered.startswith("**sources:**"):
+            normalized = normalized.split("**Sources:**", 1)[1].strip()
+            lowered = normalized.lower()
+        if lowered.startswith("sources:"):
+            normalized = normalized.split(":", 1)[1].strip()
+            lowered = normalized.lower()
+        if normalized.startswith("[") and normalized.endswith("]"):
+            normalized = normalized[1:-1].strip()
+            lowered = normalized.lower()
+        if lowered.startswith("source:"):
+            normalized = normalized.split(":", 1)[1].strip()
+        if _CODE_LABEL_RE.match(normalized):
+            return normalized
+        for token in re.split(r"[,\s]+", normalized):
+            stripped_token = token.strip()
+            if not stripped_token:
+                continue
+            if _CODE_LABEL_RE.match(stripped_token):
+                return stripped_token
         # stop if we encountered other text before label
         if not candidate:
             continue
@@ -1015,6 +1042,7 @@ def make_section_result(
         section_text=section_text,
         code_blocks=code_blocks,
         llm_config=logic_config,
+        fallback_subject=section_heading,
     )
     logger.info(
         "Section Draft[%s :: %s]: %s",
@@ -1079,8 +1107,25 @@ def make_section_result(
         final_feedback.misalignment.value if final_feedback.misalignment else "none",
         learnability,
     )
+    references: List[str] = []
+    for block in code_blocks:
+        reference = block.explanation.strip()
+        code_body = block.code.strip()
+        if not reference or not code_body:
+            continue
+        if "readme" in reference.lower():
+            continue
+        file_name = reference.rsplit("/", 1)[-1]
+        snippet = (
+            f"With that plan in mind, I carried the implementation into {file_name}:\n"
+            f"{code_body}"
+        )
+        references.append(snippet)
+    augmented_narrative = current_text
+    if references:
+        augmented_narrative = current_text.rstrip() + "\n\n" + "\n\n".join(references)
     return SectionResult(
-        narrative=current_text,
+        narrative=augmented_narrative,
         critic=final_feedback.text,
         verdict=final_feedback.verdict,
         misalignment=final_feedback.misalignment,
