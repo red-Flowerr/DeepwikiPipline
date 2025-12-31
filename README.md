@@ -46,7 +46,7 @@ python deepwiki_mcp_client.py \
   --narrative-format json \
   --narrative-modes code critic \
   --design-use-vllm \
-  --design-vllm-server-url http://[fdbd:dccd:cdd2:2101::1c4]:8000/v1/chat/completions \
+  --design-vllm-server-url http://[fdbd:dccd:cdd2:2101::1c4]:8001/v1/chat/completions \
   --design-vllm-model gpt-oss-20b \
   --design-vllm-temperature 0.2 \
   --judge-use-llm \
@@ -56,13 +56,11 @@ python deepwiki_mcp_client.py \
   --judge-max-rounds 1 \
   --log-level INFO \
   --max-pages 2 \
-  --max-sections-per-page 6 \
+  --max-sections-per-page 3 \
   --max-workers 2
 
-# 合并数据
-python utils/merge_narrative_code.py \
-  --input result_data/verl_narratives.json \
-  --output result_data/verl_narratives_merged.txt
+# 提取数据
+
 # 处理原始deepwiki脚本
 python mcp_tool/hydrate_sections.py volcengine/verl \
   --repo-commit 809ae5 \
@@ -70,6 +68,6 @@ python mcp_tool/hydrate_sections.py volcengine/verl \
 
 # 统计token量
 python token_count_local.py \
-  --text_path result_data/verl_hydrated_o.txt \
+  --text_path result_data/verl_hydrated_clean.txt \
   --tokenizer-path /mnt/hdfs/tiktok_aiic_new/user/codeai/hf_models/Qwen2.5-32B-Instruct \
   --add-special-tokens

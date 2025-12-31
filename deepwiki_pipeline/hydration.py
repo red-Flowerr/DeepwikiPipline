@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
-from typing import Dict, Optional, Set, Tuple
+from typing import Dict, Optional, Set, Tuple, List
 
 from .parsing import resolve_label_path_range
 
@@ -299,12 +299,63 @@ def _hydrate_line_references(
     return "\n".join(hydrated_lines)
 
 
+def _hydrate_code_block_references(
+    text: str,
+    *,
+    repo_root: Path,
+    cache: Dict[BracketKey, Optional[str]],
+    embedded: Set[BracketKey],
+) -> str:
+    pattern = re.compile(r"```([^\n`]*)\n(.*?)```", re.DOTALL)
+    parts: List[str] = []
+    last_index = 0
+    for match in pattern.finditer(text):
+        parts.append(text[last_index:match.start()])
+        language = (match.group(1) or "").strip()
+        body = match.group(2)
+        lines = body.splitlines()
+        snippets: List[str] = []
+        all_references = True
+        for raw_line in lines:
+            stripped = raw_line.strip()
+            if not stripped:
+                continue
+            candidate = stripped
+            if candidate.startswith(("- ", "* ", "• ")):
+                candidate = candidate[2:].strip()
+            if candidate.lower().startswith("source:"):
+                candidate = candidate.split(":", 1)[1].strip()
+            parsed = _parse_reference_string(candidate)
+            if not parsed:
+                all_references = False
+                break
+            path, start, end = parsed
+            key = (path, start, end)
+            if key not in cache:
+                cache[key] = _load_snippet(repo_root, path=path, start=start, end=end)
+            snippet = cache.get(key)
+            if not snippet:
+                all_references = False
+                break
+            embedded.add(key)
+            snippets.append(snippet.rstrip())
+        if all_references and snippets:
+            hydrated_body = "\n\n".join(snippets)
+        else:
+            hydrated_body = body
+        parts.append(f"```{language}\n{hydrated_body}\n```")
+        last_index = match.end()
+    parts.append(text[last_index:])
+    return "".join(parts)
+
+
 def hydrate_section_text(text: str, *, repo_root: Path) -> str:
     cache: Dict[BracketKey, Optional[str]] = {}
     embedded: Set[BracketKey] = set()
     hydrated = _hydrate_bracket_tokens(text, repo_root=repo_root, cache=cache, embedded=embedded)
     hydrated = _hydrate_markdown_links(hydrated, repo_root=repo_root, cache=cache, embedded=embedded)
     hydrated = _hydrate_line_references(hydrated, repo_root=repo_root, cache=cache, embedded=embedded)
+    hydrated = _hydrate_code_block_references(hydrated, repo_root=repo_root, cache=cache, embedded=embedded)
 
     remaining_snippets = []
     for key, snippet in cache.items():

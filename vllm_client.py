@@ -157,8 +157,8 @@ def call_vllm_chat(
     headers: Dict[str, str] = {}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    if destination_service:
-        headers["Destination-Service"] = destination_service
+    header_destination = destination_service or "openai"
+    headers["Destination-Service"] = header_destination
 
     response = post_with_retry(
         session=session,

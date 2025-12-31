@@ -6,7 +6,7 @@ import logging
 import re
 import textwrap
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Tuple
+from typing import Iterator, List, Optional, Sequence, Tuple, Set
 
 from .models import (
     BlockResult,
@@ -17,7 +17,7 @@ from .models import (
     NarrativeScaffold,
     SectionBlock,
 )
-from .parsing import extract_summary_paragraph
+from .parsing import extract_summary_paragraph, parse_sources_links
 
 logger = logging.getLogger(__name__)
 
@@ -954,6 +954,125 @@ def make_block_result(
 
 
 _CODE_LABEL_RE = re.compile(r"^[A-Za-z0-9_.\-/]+(?::\d+(?:-\d+)?)?$")
+_REFERENCE_INVALID_TOKENS = {"null", "none", ".", ".."}
+
+
+def _sanitize_reference_label(label: Optional[str]) -> Optional[str]:
+    if not label:
+        return None
+    cleaned = label.strip()
+    if not cleaned:
+        return None
+    lowered = cleaned.lower()
+    if lowered in _REFERENCE_INVALID_TOKENS:
+        return None
+    if "://" in cleaned or cleaned.startswith("//"):
+        return None
+    if "/" not in cleaned and ":" not in cleaned:
+        # allow README-like single filenames but skip generic words
+        if not cleaned.lower().endswith((".md", ".rst", ".txt")):
+            return None
+    if not _CODE_LABEL_RE.match(cleaned):
+        return None
+    return cleaned
+
+
+def _extract_label_from_line(line: str) -> Optional[str]:
+    working = line.strip()
+    if not working or working.startswith("```"):
+        return None
+    for prefix in ("- ", "* ", "• "):
+        if working.startswith(prefix):
+            working = working[len(prefix):].strip()
+    bracket_labels = re.findall(r"\[([^\]]+)\]", working)
+    for bracket in bracket_labels:
+        label = _sanitize_reference_label(bracket.strip())
+        if label:
+            return label
+    lowered = working.lower()
+    for marker in ("**sources:**", "**source:**", "sources:", "source:"):
+        idx = lowered.find(marker)
+        if idx != -1:
+            label = working[idx + len(marker):].strip()
+            sanitized = _sanitize_reference_label(label)
+            if sanitized:
+                return sanitized
+            for chunk in re.split(r"[;,\s]+", label):
+                sanitized = _sanitize_reference_label(chunk)
+                if sanitized:
+                    return sanitized
+            return None
+    sanitized = _sanitize_reference_label(working)
+    if sanitized:
+        return sanitized
+    for token in re.findall(r"[A-Za-z0-9_.\-/]+(?::\d+(?:-\d+)?)?", working):
+        sanitized = _sanitize_reference_label(token)
+        if sanitized:
+            return sanitized
+    return None
+
+
+def _infer_reference_from_code(code: str) -> Optional[str]:
+    for raw_line in code.splitlines():
+        stripped = raw_line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith(("- ", "* ", "• ")):
+            stripped = stripped[2:].strip()
+        if stripped.lower().startswith("source:"):
+            stripped = stripped.split(":", 1)[1].strip()
+        candidate = stripped.split()[0]
+        candidate_ref = _sanitize_reference_label(candidate)
+        if candidate_ref:
+            return candidate_ref
+    return None
+
+
+def _extract_section_sources(section_text: str) -> List[str]:
+    sources: List[str] = []
+    seen: Set[str] = set()
+    in_details = False
+    for raw_line in section_text.splitlines():
+        stripped = raw_line.strip()
+        lower = stripped.lower()
+        if stripped.startswith("<details"):
+            in_details = True
+            continue
+        if stripped.startswith("</details"):
+            in_details = False
+            continue
+        def _add_candidate(label: Optional[str]) -> None:
+            if not label:
+                return
+            if label in seen:
+                return
+            seen.add(label)
+            sources.append(label)
+
+        if "**sources:**" in lower:
+            segment = raw_line.split("**Sources:**", 1)[1] if "**Sources:**" in raw_line else raw_line.split("**sources:**", 1)[1]
+            parsed = parse_sources_links(segment)
+            if parsed:
+                for entry in parsed:
+                    label = _sanitize_reference_label(entry.get("label", ""))
+                    _add_candidate(label)
+            else:
+                for chunk in re.split(r"[;,]", segment):
+                    chunk_label = _sanitize_reference_label(chunk.strip())
+                    if not chunk_label:
+                        chunk_label = _extract_label_from_line(chunk)
+                    _add_candidate(chunk_label)
+            continue
+        if in_details and stripped.startswith("- ["):
+            parsed = parse_sources_links(stripped)
+            if parsed:
+                for entry in parsed:
+                    label = _sanitize_reference_label(entry.get("label", ""))
+                    _add_candidate(label)
+            else:
+                label = _extract_label_from_line(stripped)
+                _add_candidate(label)
+    return sources
 
 
 def _find_preceding_label(section_text: str, start: int) -> Optional[str]:
@@ -962,57 +1081,50 @@ def _find_preceding_label(section_text: str, start: int) -> Optional[str]:
         return None
     lines = prefix.rstrip("\n").splitlines()
     while lines:
-        candidate = lines.pop().strip()
-        if not candidate:
-            continue
-        if candidate.startswith("```"):
+        candidate_line = lines.pop().strip()
+        label = _extract_label_from_line(candidate_line)
+        if label:
+            return label
+        if candidate_line.startswith("```"):
             break
-        if candidate.startswith("- "):
-            candidate = candidate[2:].strip()
-        if candidate.startswith("* "):
-            candidate = candidate[2:].strip()
-        if candidate.startswith("• "):
-            candidate = candidate[2:].strip()
-        normalized = candidate
-        lowered = normalized.lower()
-        if lowered.startswith("**sources:**"):
-            normalized = normalized.split("**Sources:**", 1)[1].strip()
-            lowered = normalized.lower()
-        if lowered.startswith("sources:"):
-            normalized = normalized.split(":", 1)[1].strip()
-            lowered = normalized.lower()
-        if normalized.startswith("[") and normalized.endswith("]"):
-            normalized = normalized[1:-1].strip()
-            lowered = normalized.lower()
-        if lowered.startswith("source:"):
-            normalized = normalized.split(":", 1)[1].strip()
-        if _CODE_LABEL_RE.match(normalized):
-            return normalized
-        for token in re.split(r"[,\s]+", normalized):
-            stripped_token = token.strip()
-            if not stripped_token:
-                continue
-            if _CODE_LABEL_RE.match(stripped_token):
-                return stripped_token
-        # stop if we encountered other text before label
-        if not candidate:
-            continue
-        break
     return None
 
 
-def _extract_code_blocks(section_text: str) -> List[SectionBlock]:
-    pattern = re.compile(r"```([^\n`]*)\n(.*?)```", re.DOTALL)
+def _extract_code_blocks(section_text: str, sources_iter: Optional[Iterator[str]] = None) -> List[SectionBlock]:
+    #import pdb; pdb.set_trace()
+    sources_pattern = re.compile(r"\*\*Sources:\*\*", re.IGNORECASE)
+    code_pattern = re.compile(r"```([^\n`]*)\n(.*?)```", re.DOTALL)
     blocks: List[SectionBlock] = []
-    for match in pattern.finditer(section_text):
-        language = (match.group(1) or "").strip().lower() or "text"
-        code = match.group(2).strip("\n")
+    search_pos = 0
+    while True:
+        sources_match = sources_pattern.search(section_text, search_pos)
+        if not sources_match:
+            break
+        next_sources = sources_pattern.search(section_text, sources_match.end())
+        endpos = next_sources.start() if next_sources else len(section_text)
+        code_match = code_pattern.search(section_text, sources_match.end(), endpos)
+        if not code_match:
+            search_pos = sources_match.end()
+            continue
+        language = (code_match.group(1) or "").strip().lower() or "text"
+        code = code_match.group(2).strip("\n")
         if not code:
+            search_pos = code_match.end()
             continue
         mermaid = None
         if language == "mermaid":
             mermaid = code
-        label = _find_preceding_label(section_text, match.start())
+        label = None
+        if sources_iter is not None:
+            try:
+                label = next(sources_iter)
+            except StopIteration:
+                sources_iter = None
+        if not label:
+            label = _find_preceding_label(section_text, code_match.start())
+            label = _sanitize_reference_label(label)
+        if not label:
+            label = _infer_reference_from_code(code)
         blocks.append(
             SectionBlock(
                 explanation=label or "",
@@ -1021,6 +1133,7 @@ def _extract_code_blocks(section_text: str) -> List[SectionBlock]:
                 mermaid=mermaid,
             )
         )
+        search_pos = code_match.end()
     return blocks
 
 
@@ -1034,7 +1147,8 @@ def make_section_result(
     critic_config: Optional[JudgeLLMConfig],
     judge_rounds: int,
 ) -> SectionResult:
-    code_blocks = _extract_code_blocks(section_text)
+    sources = _extract_section_sources(section_text)
+    code_blocks = _extract_code_blocks(section_text, iter(sources))
     narrative = rewrite_section(
         repo=repo,
         page_title=page_title,
@@ -1113,11 +1227,17 @@ def make_section_result(
         code_body = block.code.strip()
         if not reference or not code_body:
             continue
-        if "readme" in reference.lower():
+        ref_clean = reference.strip()
+        ref_lower = ref_clean.lower()
+        if (
+            not ref_clean
+            or ref_lower in {"null", "none", ".", ".."}
+            or not any(ch.isalnum() for ch in ref_clean)
+            or "readme" in ref_lower
+        ):
             continue
-        file_name = reference.rsplit("/", 1)[-1]
         snippet = (
-            f"With that plan in mind, I carried the implementation into {file_name}:\n"
+            f"With that plan in mind, I carried the implementation into {ref_clean}:\n"
             f"{code_body}"
         )
         references.append(snippet)
