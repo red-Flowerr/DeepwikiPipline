@@ -32,6 +32,12 @@ pipeline v1 经过多轮迭代，目前具备以下能力：
    - CLI 可在执行中将中间结果写入文本或 JSON，断点续跑时可直接接续生成。  
    - 其他工具如 `token_count_local.py`、`hydrate_sections.py` 方便统计 token、离线水化或调试。
 
+7. **多仓批量并发生成**  
+   - `--generate-dataset` 支持重复传参、逗号分隔或 `@repo_list.txt` 形式批量指定多个仓库。  
+   - 使用 `--output-dir`、`--narrative-output-dir` 为每个仓库生成独立结果文件，文件名自动追加仓库名与提交号片段。  
+   - 可通过 `--repo-workers` 控制仓库级并发度，默认取 `min(仓库数, CPU 核心数)`，每个仓库独立维护 MCP 会话与克隆目录。  
+   - `--repo-batch-size` 可限制每个批次的仓库数量，例如大规模列表可以按 64 个一组顺序推进，避免资源峰值冲击。  
+
 # Case
 Tencent/ncnn  99ecca
 volcengine/verl 809ae5
@@ -56,6 +62,34 @@ python deepwiki_mcp_client.py \
   --judge-max-rounds 1 \
   --log-level INFO \
   --max-workers 4
+
+## 批量运行示例
+
+```bash
+python deepwiki_mcp_client.py \
+    --generate-dataset @repos.txt \
+    --output-dir result_data/batch_outputs \
+    --output-format text \
+    --narrative-output-dir result_data/batch_narratives \
+    --narrative-format json \
+    --narrative-modes code critic \
+    --design-use-vllm \
+    --design-vllm-server-url http://127.0.0.1:8801/v1/chat/completions \
+    --design-vllm-model gpt-oss-120b \
+    --design-vllm-temperature 0.7 \
+    --judge-use-llm \
+    --judge-vllm-server-url http://127.0.0.1:8801/v1/chat/completions \
+    --judge-vllm-model gpt-oss-120b \
+    --judge-vllm-temperature 0.2 \
+    --judge-max-rounds 1 \
+    --repo-workers 4 \
+    --repo-batch-size 64 \
+    --max-workers 4 \
+    --log-level INFO
+```
+--repo-workers 4：控制每个批次中最多同时处理几个仓库（也就是跨仓库的线程池规模）
+--repo-batch-size 64：把总体仓库列表切成每批最多 64 个，逐批顺序执行，避免一次性启动太多仓库
+--max-workers 4：只影响单个仓库内部的页面级并发度（DeepWikiPipeline的线程池）
 
 # 提取数据
 

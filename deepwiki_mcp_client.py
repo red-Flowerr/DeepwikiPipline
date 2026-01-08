@@ -6,9 +6,12 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from deepwiki_pipeline import (
     DeepWikiPipeline,
@@ -24,6 +27,12 @@ from deepwiki_pipeline.models import JudgeLLMConfig, NarrativeLLMConfig, Pipelin
 from deepwiki_pipeline.parsing import normalize_heading, parse_wiki_markdown
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class RepoTarget:
+    repo: str
+    commit: Optional[str] = None
 
 
 def _print_tools(session: Session) -> None:
@@ -167,6 +176,27 @@ def _render_dataset_output(output: PipelineOutput, *, as_json: bool) -> str:
     return output.to_text()
 
 
+def _write_dataset_output(
+    output: PipelineOutput,
+    destination: Path,
+    *,
+    as_json: bool,
+    log: bool = True,
+) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    rendered = _render_dataset_output(output, as_json=as_json)
+    destination.write_text(rendered, encoding="utf-8")
+    if not as_json:
+        json_path = destination.with_suffix(".json")
+        json_payload = json.dumps(output.to_dict(), ensure_ascii=False, indent=2)
+        json_path.write_text(json_payload, encoding="utf-8")
+        if log:
+            logger.info("Wrote dataset output to %s and companion JSON %s", destination, json_path)
+            return
+    if log:
+        logger.info("Wrote dataset output to %s", destination)
+
+
 def _write_or_print(text: str, destination: Optional[str]) -> None:
     if destination:
         Path(destination).write_text(text, encoding="utf-8")
@@ -256,10 +286,12 @@ def _write_narrative_output(
     modes: List[str],
     fmt: str,
     destination: Path,
+    log: bool = True,
 ) -> None:
     records = _collect_narrative_records(output)
     if not records:
-        logger.info("No narrative records to write.")
+        if log:
+            logger.info("No narrative records to write.")
         return
     destination.parent.mkdir(parents=True, exist_ok=True)
     if fmt == "json":
@@ -267,7 +299,248 @@ def _write_narrative_output(
     else:
         payload = _render_narratives_text(records, modes)
     destination.write_text(payload, encoding="utf-8")
-    logger.info("Wrote narrative output to %s", destination)
+    if log:
+        logger.info("Wrote narrative output to %s", destination)
+
+
+def _expand_repo_token(token: str) -> List[str]:
+    value = token.strip()
+    if not value:
+        return []
+    if value.startswith("@"):
+        path = Path(value[1:]).expanduser()
+        if not path.exists():
+            raise MCPError(f"Repository list file not found: {path}")
+        entries: List[str] = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line_value = line.strip()
+            if not line_value or line_value.startswith("#"):
+                continue
+            entries.extend(_expand_repo_token(line_value))
+        return entries
+    if "," in value:
+        entries: List[str] = []
+        for part in value.split(","):
+            entries.extend(_expand_repo_token(part))
+        return entries
+    return [value]
+
+
+def _parse_repo_target(raw: str, default_commit: Optional[str]) -> RepoTarget:
+    cleaned = raw.strip()
+    if not cleaned:
+        raise MCPError("Encountered empty repository identifier.")
+    repo = cleaned
+    commit = default_commit
+    if "@" in cleaned:
+        repo_part, commit_part = cleaned.split("@", 1)
+        repo = repo_part.strip()
+        commit_candidate = commit_part.strip()
+        if commit_candidate:
+            commit = commit_candidate
+    if not repo:
+        raise MCPError(f"Invalid repository specification: '{raw}'")
+    return RepoTarget(repo=repo, commit=commit)
+
+
+def _repo_slug(target: RepoTarget) -> str:
+    slug = target.repo.replace("/", "_").replace(" ", "_")
+    if target.commit:
+        commit_fragment = "".join(ch if ch.isalnum() else "-" for ch in target.commit[:12])
+        slug = f"{slug}_{commit_fragment}"
+    return slug
+
+
+def _dataset_filename(target: RepoTarget, *, as_json: bool) -> str:
+    slug = _repo_slug(target)
+    suffix = "json" if as_json else "txt"
+    return f"{slug}_deepwiki.{suffix}"
+
+
+def _narrative_filename(target: RepoTarget, *, fmt: str) -> str:
+    slug = _repo_slug(target)
+    suffix = "json" if fmt == "json" else "txt"
+    return f"{slug}_narratives.{suffix}"
+
+
+def _resolve_repo_targets(args: argparse.Namespace) -> List[RepoTarget]:
+    if args.generate_dataset is None:
+        return []
+    tokens = args.generate_dataset
+    if isinstance(tokens, str):  # pragma: no cover - legacy fallback
+        tokens = [tokens]
+    expanded: List[str] = []
+    for token in tokens:
+        expanded.extend(_expand_repo_token(token))
+    default_commit = args.repo_commit
+    targets = [_parse_repo_target(item, default_commit) for item in expanded]
+    return targets
+
+
+def _persist_outputs(
+    output: PipelineOutput,
+    *,
+    dataset_path: Optional[Path],
+    narrative_path: Optional[Path],
+    output_format: str,
+    narrative_modes: Sequence[str],
+    narrative_format: str,
+    log_writes: bool,
+) -> None:
+    if dataset_path:
+        _write_dataset_output(
+            output,
+            dataset_path,
+            as_json=output_format == "json",
+            log=log_writes,
+        )
+    if narrative_path and narrative_modes:
+        _write_narrative_output(
+            output,
+            modes=list(narrative_modes),
+            fmt=narrative_format,
+            destination=narrative_path,
+            log=log_writes,
+        )
+
+
+def _execute_pipeline_for_target(
+    *,
+    session: Session,
+    target: RepoTarget,
+    args: argparse.Namespace,
+    design_config: Optional[NarrativeLLMConfig],
+    judge_config: Optional[JudgeLLMConfig],
+    dataset_path: Optional[Path],
+    narrative_path: Optional[Path],
+    narrative_modes: Sequence[str],
+    print_to_stdout: bool,
+) -> PipelineOutput:
+    progress_needed = dataset_path is not None or (narrative_path is not None and narrative_modes)
+
+    def persist_progress(partial_output: PipelineOutput) -> None:
+        _persist_outputs(
+            partial_output,
+            dataset_path=dataset_path,
+            narrative_path=narrative_path,
+            output_format=args.output_format,
+            narrative_modes=narrative_modes,
+            narrative_format=args.narrative_format,
+            log_writes=False,
+        )
+
+    pipeline = DeepWikiPipeline(
+        session=session,
+        repo=target.repo,
+        logic_llm_config=design_config,
+        critic_llm_config=judge_config,
+        repo_commit=target.commit,
+        judge_rounds=args.judge_max_rounds,
+        max_pages=args.max_pages,
+        max_sections_per_page=args.max_sections_per_page,
+        max_workers=args.max_workers,
+        skip_pages=args.skip_page,
+    )
+    output = pipeline.run(progress_callback=persist_progress if progress_needed else None)
+
+    _persist_outputs(
+        output,
+        dataset_path=dataset_path,
+        narrative_path=narrative_path,
+        output_format=args.output_format,
+        narrative_modes=narrative_modes,
+        narrative_format=args.narrative_format,
+        log_writes=True,
+    )
+
+    if dataset_path is None and print_to_stdout:
+        rendered = _render_dataset_output(output, as_json=args.output_format == "json")
+        _write_or_print(rendered, None)
+
+    return output
+
+
+def _run_multi_repo_batch(
+    *,
+    targets: Sequence[RepoTarget],
+    args: argparse.Namespace,
+    design_config: Optional[NarrativeLLMConfig],
+    judge_config: Optional[JudgeLLMConfig],
+) -> None:
+    if not targets:
+        return
+    dataset_dir = Path(args.output_dir or "result_data").expanduser()
+    dataset_dir.mkdir(parents=True, exist_ok=True)
+    narrative_dir: Optional[Path] = None
+    narrative_modes: List[str] = []
+    if args.narrative_output_dir:
+        narrative_dir = Path(args.narrative_output_dir).expanduser()
+        narrative_dir.mkdir(parents=True, exist_ok=True)
+        narrative_modes = _normalize_narrative_modes(args.narrative_modes)
+
+    batch_size = args.repo_batch_size or len(targets)
+    if batch_size < 1:
+        raise MCPError("--repo-batch-size must be >= 1.")
+
+    cpu_default = os.cpu_count() or 4
+    default_workers = min(len(targets), max(1, cpu_default))
+    repo_workers = args.repo_workers or default_workers
+    if repo_workers < 1:
+        raise MCPError("--repo-workers must be >= 1.")
+
+    errors: List[Tuple[RepoTarget, Exception]] = []
+
+    total_batches = (len(targets) + batch_size - 1) // batch_size
+
+    for batch_index in range(total_batches):
+        start = batch_index * batch_size
+        batch_targets = targets[start : start + batch_size]
+        if not batch_targets:
+            continue
+        logger.info(
+            "Processing repository batch %d/%d (%d repositories).",
+            batch_index + 1,
+            total_batches,
+            len(batch_targets),
+        )
+
+        def worker(target: RepoTarget) -> None:
+            session = initialize_session()
+            try:
+                dataset_path = dataset_dir / _dataset_filename(target, as_json=args.output_format == "json")
+                narrative_path = None
+                if narrative_dir:
+                    narrative_path = narrative_dir / _narrative_filename(target, fmt=args.narrative_format)
+                _execute_pipeline_for_target(
+                    session=session,
+                    target=target,
+                    args=args,
+                    design_config=design_config,
+                    judge_config=judge_config,
+                    dataset_path=dataset_path,
+                    narrative_path=narrative_path,
+                    narrative_modes=narrative_modes,
+                    print_to_stdout=False,
+                )
+            finally:
+                delete_session(session)
+
+        max_workers = min(repo_workers, len(batch_targets))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_map = {executor.submit(worker, target): target for target in batch_targets}
+            for future in as_completed(future_map):
+                target = future_map[future]
+                try:
+                    future.result()
+                    logger.info("Completed repository %s", target.repo)
+                except Exception as exc:
+                    logger.error("Repository %s failed: %s", target.repo, exc)
+                    errors.append((target, exc))
+
+    if errors:
+        failed_repos = ", ".join(item.repo for item, _ in errors)
+        primary = errors[0][1]
+        raise MCPError(f"Failed to process repositories: {failed_repos}") from primary
 
 
 def _build_design_llm_config(args: argparse.Namespace) -> NarrativeLLMConfig:
@@ -353,7 +626,11 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--generate-dataset",
         metavar="REPO",
-        help="Generate a DeepWiki semantic scaffold dataset.",
+        action="append",
+        help=(
+            "Generate a DeepWiki semantic scaffold dataset. Provide multiple values by "
+            "repeating the flag, separating with commas, or referencing @file lists."
+        ),
     )
     parser.add_argument(
         "--repo-commit",
@@ -362,6 +639,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="Optional commit hash/tag to pin DeepWiki documentation.",
     )
     parser.add_argument("--output", type=str, help="Write dataset output to this file.")
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Directory to write dataset outputs when processing multiple repositories.",
+    )
     parser.add_argument(
         "--output-format",
         choices=["text", "json"],
@@ -453,6 +736,24 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--repo-workers",
+        type=int,
+        default=None,
+        help="Maximum number of repositories to process concurrently.",
+    )
+    parser.add_argument(
+        "--repo-batch-size",
+        type=int,
+        default=None,
+        help="Number of repositories per batch before advancing to the next batch.",
+    )
+    parser.add_argument(
+        "--narrative-output-dir",
+        type=str,
+        default=None,
+        help="Directory to write narrative outputs when processing multiple repositories.",
+    )
+    parser.add_argument(
         "--log-level",
         choices=["CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"],
         default="INFO",
@@ -461,20 +762,21 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def validate_args(args: argparse.Namespace) -> None:
-    if args.output and not args.generate_dataset:
+def validate_args(args: argparse.Namespace, targets: Sequence[RepoTarget]) -> None:
+    has_generation = bool(targets)
+    if args.output and not has_generation:
         raise MCPError("--output can only be used with --generate-dataset.")
-    if args.output_format != "text" and not args.generate_dataset:
+    if args.output_format != "text" and not has_generation:
         raise MCPError("--output-format can only be used with --generate-dataset.")
-    if args.design_use_vllm and not args.generate_dataset:
+    if args.design_use_vllm and not has_generation:
         raise MCPError("--design-use-vllm requires --generate-dataset.")
-    if args.judge_use_llm and not args.generate_dataset:
+    if args.judge_use_llm and not has_generation:
         raise MCPError("Judge options require --generate-dataset.")
     if args.design_use_vllm and not args.design_vllm_model:
         raise MCPError("--design-vllm-model is required when --design-use-vllm is set.")
     if args.judge_use_llm and not args.judge_vllm_model:
         raise MCPError("--judge-vllm-model is required when --judge-use-llm is set.")
-    if args.narrative_output and not args.generate_dataset:
+    if args.narrative_output and not has_generation:
         raise MCPError("--narrative-output requires --generate-dataset.")
     if args.narrative_modes and not args.narrative_output:
         raise MCPError("--narrative-modes requires --narrative-output.")
@@ -486,13 +788,25 @@ def validate_args(args: argparse.Namespace) -> None:
         raise MCPError("--max-sections-per-page must be >= 1 when provided.")
     if args.max_workers is not None and args.max_workers < 1:
         raise MCPError("--max-workers must be >= 1 when provided.")
+    if args.repo_workers is not None and args.repo_workers < 1:
+        raise MCPError("--repo-workers must be >= 1 when provided.")
+    if args.repo_batch_size is not None and args.repo_batch_size < 1:
+        raise MCPError("--repo-batch-size must be >= 1 when provided.")
+    if len(targets) > 1:
+        if args.output and not args.output_dir:
+            raise MCPError("Use --output-dir when generating datasets for multiple repositories.")
+        if args.narrative_output and not args.narrative_output_dir:
+            raise MCPError(
+                "Use --narrative-output-dir when generating narratives for multiple repositories."
+            )
 
 
 def main(argv: Optional[List[str]] = None) -> None:
     args = parse_args(argv)
     _configure_logging(args.log_level)
+    repo_targets = _resolve_repo_targets(args)
     try:
-        validate_args(args)
+        validate_args(args, repo_targets)
     except MCPError as exc:
         logger.error("%s", exc)
         sys.exit(2)
@@ -517,10 +831,8 @@ def main(argv: Optional[List[str]] = None) -> None:
                 contains=args.contains,
             )
 
-        if not args.generate_dataset:
+        if not repo_targets:
             return
-
-        target_repo = args.generate_dataset
 
         design_config = _build_design_llm_config(args) if args.design_use_vllm else None
         judge_system_prompt = _load_prompt(
@@ -543,57 +855,29 @@ def main(argv: Optional[List[str]] = None) -> None:
             else []
         )
 
-        def persist_progress(partial_output: PipelineOutput) -> None:
-            if dataset_path:
-                dataset_path.parent.mkdir(parents=True, exist_ok=True)
-                rendered_partial = _render_dataset_output(
-                    partial_output, as_json=args.output_format == "json"
-                )
-                dataset_path.write_text(rendered_partial, encoding="utf-8")
-                if args.output_format != "json":
-                    json_path = dataset_path.with_suffix(".json")
-                    json_payload = json.dumps(
-                        partial_output.to_dict(), ensure_ascii=False, indent=2
-                    )
-                    json_path.write_text(json_payload, encoding="utf-8")
-            if narrative_path:
-                narrative_path.parent.mkdir(parents=True, exist_ok=True)
-                _write_narrative_output(
-                    partial_output,
-                    modes=narrative_modes,
-                    fmt=args.narrative_format,
-                    destination=narrative_path,
-                )
-
-        pipeline = DeepWikiPipeline(
-            session=session,
-            repo=target_repo,
-            logic_llm_config=design_config,
-            critic_llm_config=judge_config,
-            repo_commit=args.repo_commit,
-            judge_rounds=args.judge_max_rounds,
-            max_pages=args.max_pages,
-            max_sections_per_page=args.max_sections_per_page,
-            max_workers=args.max_workers,
-            skip_pages=args.skip_page,
-        )
-        progress_needed = dataset_path is not None or narrative_path is not None
-        
-        output = pipeline.run(
-            progress_callback=persist_progress if progress_needed else None
-        )
-
-        rendered = _render_dataset_output(output, as_json=args.output_format == "json")
-        _write_or_print(rendered, args.output)
-        if narrative_path:
-            modes = narrative_modes or _normalize_narrative_modes(args.narrative_modes)
-            _write_narrative_output(
-                output,
-                modes=modes,
-                fmt=args.narrative_format,
-                destination=narrative_path,
+        if len(repo_targets) == 1:
+            target = repo_targets[0]
+            _execute_pipeline_for_target(
+                session=session,
+                target=target,
+                args=args,
+                design_config=design_config,
+                judge_config=judge_config,
+                dataset_path=dataset_path,
+                narrative_path=narrative_path,
+                narrative_modes=narrative_modes,
+                print_to_stdout=dataset_path is None,
             )
-
+        else:
+            if session is not None:
+                delete_session(session)
+                session = None
+            _run_multi_repo_batch(
+                targets=repo_targets,
+                args=args,
+                design_config=design_config,
+                judge_config=judge_config,
+            )
     except MCPError as exc:
         logger.error("%s", exc)
         sys.exit(1)
