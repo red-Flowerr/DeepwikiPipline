@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from .mcp import MCPError, Session, call_tool, extract_text_blocks
 from .models import (
@@ -49,6 +49,7 @@ class DeepWikiPipeline:
         max_pages: Optional[int] = None,
         max_sections_per_page: Optional[int] = None,
         max_workers: Optional[int] = None,
+        skip_pages: Optional[Sequence[str]] = None,
     ) -> None:
         self.session = session
         self.repo = repo
@@ -65,6 +66,9 @@ class DeepWikiPipeline:
         self._managed_repo_dir: Optional[Path] = None
         self._managed_repo_root: Optional[Path] = None
         self._active_repo_root: Optional[Path] = None
+        self._skip_pages: Set[str] = {
+            normalize_heading(name) for name in skip_pages or []
+        }
 
     # ------------------------------------------------------------------ #
     # MCP fetch helpers
@@ -150,22 +154,26 @@ class DeepWikiPipeline:
             return flat
 
         seen_pages: set[str] = set()
-        page_entries: List[Tuple[int, OutlineNode]] = []
+        page_entries: List[OutlineNode] = []
         for page_node in _flatten(outline_nodes):
             page_key = normalize_heading(page_node.title)
             if page_key in seen_pages:
                 continue
+            seen_pages.add(page_key)
+            if page_key in self._skip_pages:
+                logger.info("Skipping page %s due to skip-pages configuration.", page_node.title)
+                continue
             if self.max_pages is not None and len(page_entries) >= self.max_pages:
                 break
-            seen_pages.add(page_key)
-            page_entries.append((len(page_entries), page_node))
+            page_entries.append(page_node)
 
         if not page_entries:
             raise MCPError("No eligible pages were discovered in the wiki outline.")
 
         page_results: Dict[int, Tuple[Optional[DatasetChunk], List[SubsectionResult]]] = {}
         next_index_to_emit = 0
-        max_workers = self.max_workers or min(32, len(page_entries))
+        indexed_entries: List[Tuple[int, OutlineNode]] = list(enumerate(page_entries))
+        max_workers = self.max_workers or min(32, len(indexed_entries))
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
@@ -175,14 +183,14 @@ class DeepWikiPipeline:
                     pages,
                     judge_rounds,
                 ): index
-                for index, page_node in page_entries
+                for index, page_node in indexed_entries
             }
             for future in as_completed(futures):
                 index = futures[future]
                 try:
                     page_results[index] = future.result()
                 except Exception as exc:
-                    page_title = page_entries[index][1].title
+                    page_title = indexed_entries[index][1].title
                     logger.exception(
                         "Page processing failed for %s: %s",
                         page_title,

@@ -46,18 +46,16 @@ python deepwiki_mcp_client.py \
   --narrative-format json \
   --narrative-modes code critic \
   --design-use-vllm \
-  --design-vllm-server-url http://[fdbd:dccd:cdd2:2101::1c4]:8001/v1/chat/completions \
-  --design-vllm-model gpt-oss-20b \
-  --design-vllm-temperature 0.2 \
+  --design-vllm-server-url http://127.0.0.1:8801/v1/chat/completions \
+  --design-vllm-model gpt-oss-120b \
+  --design-vllm-temperature 0.7 \
   --judge-use-llm \
-  --judge-vllm-server-url http://[fdbd:dccd:cdd2:2101::1c4]:8001/v1/chat/completions \
-  --judge-vllm-model gpt-oss-20b \
-  --judge-vllm-temperature 0.0 \
+  --judge-vllm-server-url http://127.0.0.1:8801/v1/chat/completions \
+  --judge-vllm-model gpt-oss-120b \
+  --judge-vllm-temperature 0.2 \
   --judge-max-rounds 1 \
   --log-level INFO \
-  --max-pages 2 \
-  --max-sections-per-page 3 \
-  --max-workers 2
+  --max-workers 4
 
 # 提取数据
 

@@ -444,6 +444,15 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="Debug option: cap concurrent page processing threads.",
     )
     parser.add_argument(
+        "--skip-page",
+        action="append",
+        default=None,
+        help=(
+            "Skip wiki pages whose headings match this value (case-insensitive). "
+            "Use multiple times to skip several pages."
+        ),
+    )
+    parser.add_argument(
         "--log-level",
         choices=["CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"],
         default="INFO",
@@ -566,6 +575,7 @@ def main(argv: Optional[List[str]] = None) -> None:
             max_pages=args.max_pages,
             max_sections_per_page=args.max_sections_per_page,
             max_workers=args.max_workers,
+            skip_pages=args.skip_page,
         )
         progress_needed = dataset_path is not None or narrative_path is not None
         
