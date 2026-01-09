@@ -10,6 +10,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
 
+try:  # Optional, for progress bar feedback
+    from tqdm import tqdm
+except ImportError:  # pragma: no cover
+    tqdm = None
+
 from .mcp import MCPError, Session, call_tool, extract_text_blocks
 from .models import (
     DatasetChunk,
@@ -193,6 +198,18 @@ class DeepWikiPipeline:
         indexed_entries: List[Tuple[int, OutlineNode]] = list(enumerate(page_entries))
         max_workers = self.max_workers or min(32, len(indexed_entries))
 
+        completed_pages = 0
+        total_pages = len(indexed_entries)
+        progress_bar = (
+            tqdm(
+                total=total_pages,
+                desc=f"{self.repo} pages",
+                unit="page",
+                leave=False,
+            )
+            if tqdm and total_pages > 0
+            else None
+        )
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
                 executor.submit(
@@ -237,6 +254,22 @@ class DeepWikiPipeline:
                                         exc,
                                     )
                     next_index_to_emit += 1
+                completed_pages += 1
+                if progress_bar:
+                    progress_bar.update(1)
+                else:
+                    if total_pages:
+                        if completed_pages == total_pages or completed_pages % max(
+                            1, total_pages // 10
+                        ) == 0:
+                            logger.info(
+                                "Processed %d/%d pages for %s",
+                                completed_pages,
+                                total_pages,
+                                self.repo,
+                            )
+        if progress_bar:
+            progress_bar.close()
 
         if not dataset_chunks:
             raise MCPError(
@@ -275,7 +308,7 @@ class DeepWikiPipeline:
                 )
                 continue
             section_heading = section_content.heading or page.title
-            logger.info(
+            logger.debug(
                 "Processing page %s :: section %s",
                 page.title,
                 section_heading,

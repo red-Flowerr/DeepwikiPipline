@@ -85,10 +85,9 @@ python deepwiki_mcp_client.py \
     --judge-vllm-model gpt-oss-20b \
     --judge-vllm-temperature 0.2 \
     --judge-max-rounds 1 \
-    --repo-workers 1 \
+    --repo-workers 16 \
     --repo-batch-size 64 \
-    --max-workers 1 \
-    --log-level INFO
+    --max-workers 16
 ```
 --repo-workers 4：控制每个批次中最多同时处理几个仓库（也就是跨仓库的线程池规模）
 --repo-batch-size 64：把总体仓库列表切成每批最多 64 个，逐批顺序执行，避免一次性启动太多仓库

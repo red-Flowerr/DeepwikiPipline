@@ -8,10 +8,16 @@ import json
 import logging
 import os
 import sys
+import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+try:  # Optional progress indicator
+    from tqdm import tqdm
+except ImportError:  # pragma: no cover
+    tqdm = None
 
 from deepwiki_pipeline import (
     DeepWikiPipeline,
@@ -505,6 +511,12 @@ def _run_multi_repo_batch(
     errors: List[Tuple[RepoTarget, Exception]] = []
 
     total_batches = (len(targets) + batch_size - 1) // batch_size
+    overall_bar = (
+        tqdm(total=len(targets), desc="Repositories", unit="repo", leave=False)
+        if tqdm and targets
+        else None
+    )
+    processed_repos = 0
 
     for batch_index in range(total_batches):
         start = batch_index * batch_size
@@ -546,10 +558,22 @@ def _run_multi_repo_batch(
                 target = future_map[future]
                 try:
                     future.result()
-                    logger.info("Completed repository %s", target.repo)
+                    processed_repos += 1
+                    if overall_bar:
+                        overall_bar.update(1)
+                    else:
+                        logger.info(
+                            "Completed %d/%d repositories (%s)",
+                            processed_repos,
+                            len(targets),
+                            target.repo,
+                        )
                 except Exception as exc:
                     logger.error("Repository %s failed: %s", target.repo, exc)
                     errors.append((target, exc))
+
+    if overall_bar:
+        overall_bar.close()
 
     if errors:
         failed_repos = ", ".join(item.repo for item, _ in errors)
@@ -618,6 +642,11 @@ def _configure_logging(level: str) -> None:
         level=getattr(logging, level.upper(), logging.INFO),
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+    for name in ("LiteLLM", "LiteLLM Router"):
+        lite_logger = logging.getLogger(name)
+        lite_logger.setLevel(logging.WARNING)
+        lite_logger.propagate = False
+    warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:

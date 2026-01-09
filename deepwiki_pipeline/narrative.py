@@ -874,7 +874,7 @@ def make_block_result(
         block=block,
         llm_config=logic_config,
     )
-    logger.info(
+    logger.debug(
         "Draft[%s :: %s :: block %d :: pass %d]: %s",
         page_title,
         section_heading,
@@ -903,7 +903,7 @@ def make_block_result(
         )
         critic_history.append(feedback.text)
         final_feedback = feedback
-        logger.info(
+        logger.debug(
             "Judge[%s :: %s :: block %d :: pass %d]: verdict=%s misalignment=%s critic=%s",
             page_title,
             section_heading,
@@ -927,7 +927,7 @@ def make_block_result(
             block=block,
             llm_config=logic_config,
         )
-        logger.info(
+        logger.debug(
             "Refine[%s :: %s :: block %d :: pass %d]: %s",
             page_title,
             section_heading,
@@ -938,7 +938,7 @@ def make_block_result(
 
     final_scaffold = build_scaffold(current_text, block)
     learnability = compute_learnability_score(current_text)
-    logger.info(
+    logger.debug(
         "Final[%s :: %s :: block %d]: verdict=%s misalignment=%s learnability=%.3f",
         page_title,
         section_heading,
@@ -1165,7 +1165,7 @@ def make_section_result(
         llm_config=logic_config,
         fallback_subject=section_heading,
     )
-    logger.info(
+    logger.debug(
         "Section Draft[%s :: %s]: %s",
         page_title,
         section_heading,
@@ -1190,7 +1190,7 @@ def make_section_result(
         )
         critic_history.append(feedback.text)
         final_feedback = feedback
-        logger.info(
+        logger.debug(
             "Section Judge[%s :: %s :: pass %d]: verdict=%s misalignment=%s critic=%s",
             page_title,
             section_heading,
@@ -1212,7 +1212,7 @@ def make_section_result(
             code_blocks=code_blocks,
             llm_config=logic_config,
         )
-        logger.info(
+        logger.debug(
             "Section Refine[%s :: %s :: pass %d]: %s",
             page_title,
             section_heading,
@@ -1220,7 +1220,7 @@ def make_section_result(
             _truncate(current_text, 400),
         )
     learnability = compute_learnability_score(current_text)
-    logger.info(
+    logger.debug(
         "Section Final[%s :: %s]: verdict=%s misalignment=%s learnability=%.3f",
         page_title,
         section_heading,
