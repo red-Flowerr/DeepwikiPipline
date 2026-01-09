@@ -237,33 +237,45 @@ def _call_litellm_router(
     destination_service: Optional[str],
     timeout: float,
 ) -> str:
-    router = _get_litellm_router(
-        endpoints=endpoints,
-        model=model,
-        api_key=api_key,
-        destination_service=destination_service,
-        timeout=timeout,
-    )
-    kwargs: Dict[str, object] = {
-        "model": model,
-        "messages": messages,
-        "temperature": temperature,
-        "timeout": timeout,
-    }
-    if max_tokens is not None:
-        kwargs["max_tokens"] = max_tokens
-    if top_p is not None:
-        kwargs["top_p"] = top_p
-    try:
-        # import pdb; pdb.set_trace()
-        logger.debug(
-            "Dispatching LiteLLM chat completion for model %s across %d endpoints.",
-            model,
-            len(endpoints),
+    cache_key = (tuple(endpoints), model, api_key or "", destination_service or "")
+    attempt = 0
+    while True:
+        attempt += 1
+        router = _get_litellm_router(
+            endpoints=endpoints,
+            model=model,
+            api_key=api_key,
+            destination_service=destination_service,
+            timeout=timeout,
         )
-        response = router.completion(**kwargs)
-    except Exception as exc:  # pragma: no cover - passthrough error handling
-        raise VLLMError(f"LiteLLM router call failed: {exc}") from exc
+        kwargs: Dict[str, object] = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "timeout": timeout,
+        }
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
+        if top_p is not None:
+            kwargs["top_p"] = top_p
+        try:
+            logger.debug(
+                "Dispatching LiteLLM chat completion for model %s across %d endpoints (attempt %d).",
+                model,
+                len(endpoints),
+                attempt,
+            )
+            response = router.completion(**kwargs)
+        except Exception as exc:  # pragma: no cover - passthrough error handling
+            lowered = str(exc).lower()
+            transient = "connection is closed by peer" in lowered or "connection is closed" in lowered
+            if transient and attempt < 2:
+                with _ROUTER_LOCK:
+                    _ROUTER_CACHE.pop(cache_key, None)
+                logger.debug("Refreshing LiteLLM router cache after transient connection reset.")
+                continue
+            raise VLLMError(f"LiteLLM router call failed: {exc}") from exc
+        break
     payload: Dict[str, object]
     if hasattr(response, "model_dump"):
         payload = response.model_dump()
