@@ -119,7 +119,7 @@ def post_with_retry(
             )
             
             if response.status_code == 400:
-                import pdb; pdb.set_trace()
+                # import pdb; pdb.set_trace()
                 hint, detail = _describe_bad_request(response)
                 logger.error(
                     "vLLM chat request returned HTTP 400 (%s). Detail: %s",
