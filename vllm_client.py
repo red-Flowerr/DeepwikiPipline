@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import time
+import threading
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union, cast
+from urllib.parse import urlsplit, urlunsplit
 
 import requests
+
+try:
+    from litellm import Router
+except ImportError:  # pragma: no cover
+    Router = None  # type: ignore[assignment]
 
 
 @dataclass
@@ -20,6 +26,10 @@ class ChatMessage:
 
 class VLLMError(RuntimeError):
     pass
+
+
+_ROUTER_CACHE: Dict[Tuple[str, ...], object] = {}
+_ROUTER_LOCK = threading.Lock()
 
 
 def normalize_host(host: str) -> str:
@@ -39,6 +49,66 @@ def build_url(
         return server_url
     suffix = path if path.startswith("/") else f"/{path}"
     return f"http://{normalize_host(host)}:{port}{suffix}"
+
+
+def _coerce_endpoint(
+    value: Optional[str],
+    default_host: str,
+    default_port: int,
+    default_path: str,
+) -> Optional[str]:
+    if value is None:
+        return None
+    entry = str(value).strip()
+    if not entry:
+        return None
+    inferred = entry
+    if "://" not in entry:
+        inferred = f"http://{entry}"
+    parsed = urlsplit(inferred)
+    scheme = parsed.scheme or "http"
+    netloc = parsed.netloc
+    path_part = parsed.path or ""
+    if not netloc:
+        # Treat as path override on default host/port.
+        path_part = path_part or default_path
+        return build_url(None, default_host, default_port, path_part)
+    if path_part in {"", "/"}:
+        path_part = default_path
+    if not path_part.startswith("/"):
+        path_part = f"/{path_part}"
+    if parsed.query or parsed.fragment:
+        logger.warning(
+            "Dropping query/fragment from LiteLLM server URL '%s'.",
+            entry,
+        )
+    endpoint = urlunsplit((scheme, netloc, path_part.rstrip("/"), "", ""))
+    return endpoint.rstrip("/")
+
+
+def _normalize_server_pool(
+    server_urls: Sequence[str],
+    host: str,
+    port: int,
+    path: str,
+    fallback_url: Optional[str],
+) -> List[str]:
+    candidates: List[str] = []
+    for value in server_urls:
+        endpoint = _coerce_endpoint(value, host, port, path)
+        if endpoint:
+            candidates.append(endpoint)
+    if fallback_url:
+        fallback_endpoint = _coerce_endpoint(fallback_url, host, port, path)
+        if fallback_endpoint:
+            candidates.append(fallback_endpoint)
+    if not candidates:
+        candidates.append(build_url(None, host, port, path))
+    normalized: List[str] = []
+    for endpoint in candidates:
+        if endpoint not in normalized:
+            normalized.append(endpoint)
+    return normalized
 
 
 def _summarize_text(text: str, limit: int = 500) -> str:
@@ -97,6 +167,118 @@ def _describe_bad_request(response: requests.Response) -> Tuple[str, str]:
     else:
         detail = _summarize_text(json.dumps(payload))
     return hint, detail
+
+
+def _get_litellm_router(
+    endpoints: Sequence[str],
+    model: str,
+    api_key: Optional[str],
+    destination_service: Optional[str],
+    timeout: float,
+):
+    if Router is None:
+        raise VLLMError(
+            "LiteLLM is required for server pooling. Install it with `pip install litellm`."
+        )
+    cache_key = (tuple(endpoints), model, api_key or "", destination_service or "")
+    with _ROUTER_LOCK:
+        cached = cast(Optional["Router"], _ROUTER_CACHE.get(cache_key))
+        if cached is not None:
+            return cached
+        model_list: List[Dict[str, object]] = []
+        for endpoint in endpoints:
+            parsed = urlsplit(endpoint)
+            scheme = parsed.scheme or "http"
+            netloc = parsed.netloc or ""
+            path = parsed.path or ""
+            if not netloc:
+                # Handle endpoints provided as bare host/path strings.
+                netloc = path
+                path = ""
+            base_path = path
+            if base_path.endswith("/chat/completions"):
+                base_path = base_path[: -len("/chat/completions")]
+            if not base_path:
+                base_path = "/v1"
+            base_path = base_path.rstrip("/")
+            api_base = urlunsplit((scheme, netloc, base_path, "", ""))
+            header_value = destination_service or "openai"
+            extra_headers = {"Destination-Service": header_value}
+            litellm_params: Dict[str, object] = {
+                "model": f"openai/{model}",
+                "api_base": api_base,
+                "extra_headers": extra_headers,
+            }
+            litellm_params["api_key"] = api_key or "dummy-key"
+            model_list.append(
+                {
+                    "model_name": model,
+                    "litellm_params": litellm_params,
+                }
+            )
+        router = Router(model_list=model_list, timeout=timeout)
+        _ROUTER_CACHE[cache_key] = router
+        logger.debug(
+            "Initialized LiteLLM router for model %s with %d endpoints.",
+            model,
+            len(endpoints),
+        )
+        return router
+
+
+def _call_litellm_router(
+    endpoints: Sequence[str],
+    model: str,
+    messages: List[Dict[str, str]],
+    temperature: float,
+    max_tokens: Optional[int],
+    top_p: Optional[float],
+    api_key: Optional[str],
+    destination_service: Optional[str],
+    timeout: float,
+) -> str:
+    router = _get_litellm_router(
+        endpoints=endpoints,
+        model=model,
+        api_key=api_key,
+        destination_service=destination_service,
+        timeout=timeout,
+    )
+    kwargs: Dict[str, object] = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "timeout": timeout,
+    }
+    if max_tokens is not None:
+        kwargs["max_tokens"] = max_tokens
+    if top_p is not None:
+        kwargs["top_p"] = top_p
+    try:
+        # import pdb; pdb.set_trace()
+        logger.debug(
+            "Dispatching LiteLLM chat completion for model %s across %d endpoints.",
+            model,
+            len(endpoints),
+        )
+        response = router.completion(**kwargs)
+    except Exception as exc:  # pragma: no cover - passthrough error handling
+        raise VLLMError(f"LiteLLM router call failed: {exc}") from exc
+    payload: Dict[str, object]
+    if hasattr(response, "model_dump"):
+        payload = response.model_dump()
+    elif hasattr(response, "dict"):
+        payload = response.dict()
+    elif isinstance(response, dict):
+        payload = response
+    else:
+        raise VLLMError(
+            f"Unsupported LiteLLM response type: {type(response)!r}"
+        )
+    content = extract_content(payload)
+    if content is None:
+        raise VLLMError("LiteLLM router response did not contain message content.")
+    return content
 
 
 def post_with_retry(
@@ -205,17 +387,39 @@ def call_vllm_chat(
     max_tokens: Optional[int] = None,
     top_p: Optional[float] = None,
     server_url: Optional[str] = None,
+    server_urls: Optional[Sequence[str]] = None,
     api_key: Optional[str] = None,
     destination_service: Optional[str] = None,
     timeout: float = 60.0,
     retries: int = 2,
     retry_backoff: float = 2.0,
 ) -> str:
+    message_payload = [msg.__dict__ for msg in messages]
+    if server_urls:
+        endpoints = _normalize_server_pool(
+            server_urls,
+            host=host,
+            port=port,
+            path=path,
+            fallback_url=server_url,
+        )
+        return _call_litellm_router(
+            endpoints=endpoints,
+            model=model,
+            messages=message_payload,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            top_p=top_p,
+            api_key=api_key,
+            destination_service=destination_service,
+            timeout=timeout,
+        )
+
     session = requests.Session()
     url = build_url(server_url, host, port, path)
     payload: Dict[str, object] = {
         "model": model,
-        "messages": [msg.__dict__ for msg in messages],
+        "messages": message_payload,
         "temperature": temperature,
     }
     if max_tokens is not None:

@@ -1,2 +1,16 @@
 volcengine/verl@809ae5
 Tencent/ncnn@99ecca
+microsoft/vscode@1cd324
+huggingface/transformers@3aa215
+microsoft/playwright@0ed249
+opendatalab/MinerU@8c4b3e
+karpathy/nanochat@48abd7
+eosphoros-ai/DB-GPT@7751b0
+linshenkx/prompt-optimizer@130b8f
+nextapps-de/flexsearch@defb38
+agent0ai/agent-zero@a54768
+hackjutsu/Lepton@a1b2c4
+langchain-ai/langchain@cd5b36
+anthropics/anthropic-sdk-python@2eb941
+redis/redis@8ad542
+colinhacks/zod@9712a6

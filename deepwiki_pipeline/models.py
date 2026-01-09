@@ -246,7 +246,6 @@ class DatasetChunk:
 
 @dataclass
 class NarrativeLLMConfig:
-    server_url: Optional[str]
     host: str
     port: int
     path: str
@@ -259,11 +258,12 @@ class NarrativeLLMConfig:
     timeout: float = 60.0
     retries: int = 2
     retry_backoff: float = 2.0
+    server_url: Optional[str] = None
+    server_urls: Optional[List[str]] = None
 
 
 @dataclass
 class JudgeLLMConfig:
-    server_url: Optional[str]
     host: str
     port: int
     path: str
@@ -276,6 +276,8 @@ class JudgeLLMConfig:
     timeout: float = 60.0
     retries: int = 2
     retry_backoff: float = 2.0
+    server_url: Optional[str] = None
+    server_urls: Optional[List[str]] = None
     system_prompt: Optional[str] = None
 
 

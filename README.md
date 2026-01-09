@@ -37,6 +37,9 @@ pipeline v1 经过多轮迭代，目前具备以下能力：
    - 使用 `--output-dir`、`--narrative-output-dir` 为每个仓库生成独立结果文件，文件名自动追加仓库名与提交号片段。  
    - 可通过 `--repo-workers` 控制仓库级并发度，默认取 `min(仓库数, CPU 核心数)`，每个仓库独立维护 MCP 会话与克隆目录。  
    - `--repo-batch-size` 可限制每个批次的仓库数量，例如大规模列表可以按 64 个一组顺序推进，避免资源峰值冲击。  
+8. **LiteLLM 多 server 分发（可选）**  
+   - 通过 `--design-vllm-server-urls` / `--judge-vllm-server-urls` 传入逗号分隔或重复参数形式的地址列表，自动使用 LiteLLM Router 做负载均衡。  
+   - 需要 `pip install litellm`，未指定列表时会沿用单个 `--*-server-url` 作为兜底节点。  
 
 # Case
 Tencent/ncnn  99ecca
@@ -52,11 +55,11 @@ python deepwiki_mcp_client.py \
   --narrative-format json \
   --narrative-modes code critic \
   --design-use-vllm \
-  --design-vllm-server-url http://127.0.0.1:8801/v1/chat/completions \
+  --design-vllm-server-urls http://[fdbd:dccd:cdd2:2001::1c2]:8802/v1/chat/completions,http://[fdbd:dccd:cdd2:2001::1c7]:8802/v1/chat/completions \
   --design-vllm-model gpt-oss-120b \
   --design-vllm-temperature 0.7 \
   --judge-use-llm \
-  --judge-vllm-server-url http://127.0.0.1:8801/v1/chat/completions \
+  --judge-vllm-server-urls http://[fdbd:dccd:cdd2:2001::1c2]:8802/v1/chat/completions,http://[fdbd:dccd:cdd2:2001::1c7]:8802/v1/chat/completions \
   --judge-vllm-model gpt-oss-120b \
   --judge-vllm-temperature 0.2 \
   --judge-max-rounds 1 \
@@ -74,12 +77,12 @@ python deepwiki_mcp_client.py \
     --narrative-format json \
     --narrative-modes code critic \
     --design-use-vllm \
-    --design-vllm-server-url http://127.0.0.1:8000/v1/chat/completions \
-    --design-vllm-model gpt-oss-120b \
+    --design-vllm-server-urls "http://[fdbd:dccd:cdd2:2001::1c2]:8000/v1/chat/completions,http://[fdbd:dccd:cdd2:2001::1c7]:8000/v1/chat/completions" \
+    --design-vllm-model gpt-oss-20b \
     --design-vllm-temperature 0.7 \
     --judge-use-llm \
-    --judge-vllm-server-url http://127.0.0.1:8000/v1/chat/completions \
-    --judge-vllm-model gpt-oss-120b \
+    --judge-vllm-server-urls "http://[fdbd:dccd:cdd2:2001::1c2]:8000/v1/chat/completions,http://[fdbd:dccd:cdd2:2001::1c7]:8000/v1/chat/completions" \
+    --judge-vllm-model gpt-oss-20b \
     --judge-vllm-temperature 0.2 \
     --judge-max-rounds 1 \
     --repo-workers 1 \
@@ -103,3 +106,4 @@ python token_count_local.py \
   --text_path result_data/verl_hydrated_clean.txt \
   --tokenizer-path /mnt/hdfs/tiktok_aiic_new/user/codeai/hf_models/Qwen2.5-32B-Instruct \
   --add-special-tokens
+

@@ -205,6 +205,20 @@ def _write_or_print(text: str, destination: Optional[str]) -> None:
         print(text)
 
 
+def _parse_server_url_list(values: Optional[Sequence[str]]) -> Optional[List[str]]:
+    if not values:
+        return None
+    urls: List[str] = []
+    for raw in values:
+        if not raw:
+            continue
+        parts = [part.strip() for part in raw.split(",")]
+        for part in parts:
+            if part and part not in urls:
+                urls.append(part)
+    return urls or None
+
+
 def _normalize_narrative_modes(modes: Optional[List[str]]) -> List[str]:
     if not modes:
         return ["code"]
@@ -546,8 +560,10 @@ def _run_multi_repo_batch(
 def _build_design_llm_config(args: argparse.Namespace) -> NarrativeLLMConfig:
     max_tokens = args.design_vllm_max_tokens or None
     top_p = args.design_vllm_top_p or None
+    server_pool = _parse_server_url_list(args.design_vllm_server_urls)
     return NarrativeLLMConfig(
         server_url=args.design_vllm_server_url,
+        server_urls=server_pool,
         host=args.design_vllm_host,
         port=args.design_vllm_port,
         path=args.design_vllm_path,
@@ -566,8 +582,10 @@ def _build_design_llm_config(args: argparse.Namespace) -> NarrativeLLMConfig:
 def _build_judge_llm_config(args: argparse.Namespace, *, system_prompt: Optional[str]) -> JudgeLLMConfig:
     max_tokens = args.judge_vllm_max_tokens or None
     top_p = args.judge_vllm_top_p or None
+    server_pool = _parse_server_url_list(args.judge_vllm_server_urls)
     return JudgeLLMConfig(
         server_url=args.judge_vllm_server_url,
+        server_urls=server_pool,
         host=args.judge_vllm_host,
         port=args.judge_vllm_port,
         path=args.judge_vllm_path,
@@ -657,6 +675,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="Enable external vLLM server for design intent rewriting.",
     )
     parser.add_argument("--design-vllm-server-url", type=str, default=None)
+    parser.add_argument(
+        "--design-vllm-server-urls",
+        action="append",
+        default=None,
+        help="Additional design server URLs for LiteLLM pooling (supports comma-separated values).",
+    )
     parser.add_argument("--design-vllm-host", type=str, default="127.0.0.1")
     parser.add_argument("--design-vllm-port", type=int, default=8000)
     parser.add_argument("--design-vllm-path", type=str, default="/v1/chat/completions")
@@ -671,6 +695,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--design-vllm-destination-service", type=str, default="openai")
     parser.add_argument("--judge-use-llm", action="store_true", help="Enable vLLM judge model.")
     parser.add_argument("--judge-vllm-server-url", type=str, default=None)
+    parser.add_argument(
+        "--judge-vllm-server-urls",
+        action="append",
+        default=None,
+        help="Additional judge server URLs for LiteLLM pooling (supports comma-separated values).",
+    )
     parser.add_argument("--judge-vllm-host", type=str, default="127.0.0.1")
     parser.add_argument("--judge-vllm-port", type=int, default=8000)
     parser.add_argument("--judge-vllm-path", type=str, default="/v1/chat/completions")
