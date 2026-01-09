@@ -68,23 +68,23 @@ python deepwiki_mcp_client.py \
 ```bash
 python deepwiki_mcp_client.py \
     --generate-dataset @repos.txt \
-    --output-dir result_data/batch_outputs \
+    --narrative-output result_data/batch_outputs \
     --output-format text \
     --narrative-output-dir result_data/batch_narratives \
     --narrative-format json \
     --narrative-modes code critic \
     --design-use-vllm \
-    --design-vllm-server-url http://127.0.0.1:8801/v1/chat/completions \
+    --design-vllm-server-url http://127.0.0.1:8000/v1/chat/completions \
     --design-vllm-model gpt-oss-120b \
     --design-vllm-temperature 0.7 \
     --judge-use-llm \
-    --judge-vllm-server-url http://127.0.0.1:8801/v1/chat/completions \
+    --judge-vllm-server-url http://127.0.0.1:8000/v1/chat/completions \
     --judge-vllm-model gpt-oss-120b \
     --judge-vllm-temperature 0.2 \
     --judge-max-rounds 1 \
-    --repo-workers 4 \
+    --repo-workers 1 \
     --repo-batch-size 64 \
-    --max-workers 4 \
+    --max-workers 1 \
     --log-level INFO
 ```
 --repo-workers 4：控制每个批次中最多同时处理几个仓库（也就是跨仓库的线程池规模）

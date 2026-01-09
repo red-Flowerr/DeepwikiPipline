@@ -15,6 +15,10 @@ BracketKey = Tuple[str, int, int]
 
 PATH_RANGE_RE = re.compile(r"([A-Za-z0-9_.\-/]+):(\d+)(?:-(\d+))?")
 PATH_ALLOWED_RE = re.compile(r"^[A-Za-z0-9_.\-/]+$")
+DETAILS_BLOCK_RE = re.compile(
+    r"<details\b[^>]*?>.*?</details>",
+    re.IGNORECASE | re.DOTALL,
+)
 
 _LANGUAGE_BY_SUFFIX = {
     ".py": "python",
@@ -199,6 +203,21 @@ def _format_snippet(path: str, start: int, end: int, snippet: str) -> str:
     return f"{label}\n```{language}\n{body}\n```"
 
 
+def _extract_details_blocks(text: str) -> Tuple[str, Dict[str, str]]:
+    """
+    Remove <details> blocks temporarily so hydration does not expand their content.
+    """
+    blocks: Dict[str, str] = {}
+
+    def _replacer(match: re.Match[str]) -> str:
+        key = f"__DEEPWIKI_DETAILS_{len(blocks)}__"
+        blocks[key] = match.group(0)
+        return key
+
+    stripped = DETAILS_BLOCK_RE.sub(_replacer, text)
+    return stripped, blocks
+
+
 def _strip_link_target(target: str) -> str:
     cleaned = target.strip()
     if cleaned.startswith("<") and cleaned.endswith(">"):
@@ -350,9 +369,15 @@ def _hydrate_code_block_references(
 
 
 def hydrate_section_text(text: str, *, repo_root: Path) -> str:
+    working_text, detail_blocks = _extract_details_blocks(text)
     cache: Dict[BracketKey, Optional[str]] = {}
     embedded: Set[BracketKey] = set()
-    hydrated = _hydrate_bracket_tokens(text, repo_root=repo_root, cache=cache, embedded=embedded)
+    hydrated = _hydrate_bracket_tokens(
+        working_text,
+        repo_root=repo_root,
+        cache=cache,
+        embedded=embedded,
+    )
     hydrated = _hydrate_markdown_links(hydrated, repo_root=repo_root, cache=cache, embedded=embedded)
     hydrated = _hydrate_line_references(hydrated, repo_root=repo_root, cache=cache, embedded=embedded)
     hydrated = _hydrate_code_block_references(hydrated, repo_root=repo_root, cache=cache, embedded=embedded)
@@ -367,5 +392,8 @@ def hydrate_section_text(text: str, *, repo_root: Path) -> str:
 
     if remaining_snippets:
         hydrated = hydrated.rstrip() + "\n\n" + "\n\n".join(remaining_snippets)
+
+    for placeholder, block in detail_blocks.items():
+        hydrated = hydrated.replace(placeholder, block)
 
     return hydrated

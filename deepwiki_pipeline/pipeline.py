@@ -74,6 +74,22 @@ class DeepWikiPipeline:
     # MCP fetch helpers
     # ------------------------------------------------------------------ #
 
+    def _validate_text_blocks(self, blocks: List[str], tool_name: str) -> List[str]:
+        if not blocks:
+            raise MCPError(f"{tool_name} returned no textual content.")
+        for block in blocks:
+            text = block.strip()
+            if not text:
+                continue
+            lowered = text.lower()
+            if lowered.startswith("error fetching wiki for"):
+                raise MCPError(text)
+            if "repository not found" in lowered and "deepwiki" in lowered:
+                raise MCPError(text)
+            if lowered.startswith("deepwiki is currently indexing"):
+                raise MCPError(text)
+        return blocks
+
     def _fetch_structure_text(self) -> str:
         result = call_tool(
             self.session,
@@ -83,9 +99,10 @@ class DeepWikiPipeline:
                 **({"repoCommit": self.repo_commit} if self.repo_commit else {}),
             },
         )
-        blocks = extract_text_blocks(result)
-        if not blocks:
-            raise MCPError("read_wiki_structure returned no textual content.")
+        blocks = self._validate_text_blocks(
+            extract_text_blocks(result),
+            "read_wiki_structure",
+        )
         return "\n\n".join(blocks)
 
     def _fetch_pages(self) -> Dict[str, PageContent]:
@@ -97,9 +114,10 @@ class DeepWikiPipeline:
                 **({"repoCommit": self.repo_commit} if self.repo_commit else {}),
             },
         )
-        blocks = extract_text_blocks(result)
-        if not blocks:
-            raise MCPError("read_wiki_contents returned no textual content.")
+        blocks = self._validate_text_blocks(
+            extract_text_blocks(result),
+            "read_wiki_contents",
+        )
         markdown = "\n\n".join(blocks)
         pages = parse_wiki_markdown(markdown)
         if not pages:

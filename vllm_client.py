@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Sequence, Union
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import requests
 
@@ -40,6 +41,64 @@ def build_url(
     return f"http://{normalize_host(host)}:{port}{suffix}"
 
 
+def _summarize_text(text: str, limit: int = 500) -> str:
+    stripped = (text or "").strip()
+    if not stripped:
+        return "<empty response body>"
+    if len(stripped) > limit:
+        return f"{stripped[:limit]}... [truncated]"
+    return stripped
+
+
+def _describe_bad_request(response: requests.Response) -> Tuple[str, str]:
+    hint = "cause unknown"
+    detail = "<empty response body>"
+    try:
+        payload = response.json()
+    except ValueError:
+        text = response.text or ""
+        lowered = text.lower()
+        if "context" in lowered and "token" in lowered:
+            hint = "probable context length limit"
+        elif "max token" in lowered or "too many tokens" in lowered:
+            hint = "probable max_tokens limit"
+        detail = _summarize_text(text)
+        return hint, detail
+
+    if not isinstance(payload, dict):
+        detail = _summarize_text(str(payload))
+        return hint, detail
+
+    error_obj = payload.get("error")
+    if isinstance(error_obj, dict):
+        message = str(error_obj.get("message") or "")
+        code = error_obj.get("code")
+        error_type = error_obj.get("type")
+        detail = _summarize_text(message or json.dumps(error_obj))
+        normalized_code = str(code).strip() if isinstance(code, str) else ""
+        lower_message = message.lower()
+        if normalized_code:
+            if normalized_code in {
+                "context_length_exceeded",
+                "max_context_length_exceeded",
+                "context_length",
+            }:
+                hint = f"context length exceeded ({normalized_code})"
+            elif normalized_code in {"too_many_tokens", "max_tokens_exceeded"}:
+                hint = f"token limit exceeded ({normalized_code})"
+            else:
+                hint = normalized_code
+        elif "context length" in lower_message or "token limit" in lower_message:
+            hint = "probable context length limit"
+        elif "max tokens" in lower_message or "too many tokens" in lower_message:
+            hint = "probable max_tokens limit"
+        elif isinstance(error_type, str) and error_type.strip():
+            hint = error_type.strip()
+    else:
+        detail = _summarize_text(json.dumps(payload))
+    return hint, detail
+
+
 def post_with_retry(
     session: requests.Session,
     url: str,
@@ -58,6 +117,16 @@ def post_with_retry(
                 headers=headers,
                 timeout=timeout,
             )
+            
+            if response.status_code == 400:
+                import pdb; pdb.set_trace()
+                hint, detail = _describe_bad_request(response)
+                logger.error(
+                    "vLLM chat request returned HTTP 400 (%s). Detail: %s",
+                    hint,
+                    detail,
+                )   
+                raise VLLMError(f"HTTP 400 Bad Request from vLLM ({hint}). Detail: {detail}")
             response.raise_for_status()
             return response.json()
         except (requests.RequestException, json.JSONDecodeError) as exc:
