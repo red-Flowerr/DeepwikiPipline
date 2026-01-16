@@ -43,7 +43,7 @@ class DeepWikiPipeline:
 
     def __init__(
         self,
-        session: Session,
+        session: Optional[Session],
         repo: str,
         logic_llm_config: Optional[NarrativeLLMConfig] = None,
         critic_llm_config: Optional[JudgeLLMConfig] = None,
@@ -74,6 +74,8 @@ class DeepWikiPipeline:
         self._skip_pages: Set[str] = {
             normalize_heading(name) for name in skip_pages or []
         }
+        self._offline_outline_text: Optional[str] = None
+        self._offline_wiki_markdown: Optional[str] = None
 
     # ------------------------------------------------------------------ #
     # MCP fetch helpers
@@ -96,6 +98,8 @@ class DeepWikiPipeline:
         return blocks
 
     def _fetch_structure_text(self) -> str:
+        if self.session is None:
+            raise MCPError("MCP session is required to fetch wiki structure.")
         result = call_tool(
             self.session,
             "read_wiki_structure",
@@ -111,6 +115,8 @@ class DeepWikiPipeline:
         return "\n\n".join(blocks)
 
     def _fetch_pages(self) -> Dict[str, PageContent]:
+        if self.session is None:
+            raise MCPError("MCP session is required to fetch wiki contents.")
         result = call_tool(
             self.session,
             "read_wiki_contents",
@@ -136,7 +142,12 @@ class DeepWikiPipeline:
     def run(
         self,
         progress_callback: Optional[Callable[[PipelineOutput], None]] = None,
+        *,
+        outline_text: Optional[str] = None,
+        wiki_markdown: Optional[str] = None,
     ) -> PipelineOutput:
+        self._offline_outline_text = outline_text
+        self._offline_wiki_markdown = wiki_markdown
         repo_root = None
         try:
             repo_root = self._ensure_repo_checkout()
@@ -144,6 +155,8 @@ class DeepWikiPipeline:
             return self._run_with_repo(progress_callback=progress_callback)
         finally:
             self._active_repo_root = None
+            self._offline_outline_text = None
+            self._offline_wiki_markdown = None
             if repo_root and not self.repo_root:
                 self._cleanup_repo_checkout()
 
@@ -157,14 +170,21 @@ class DeepWikiPipeline:
                 "Non-positive judge_rounds (%d) requested; defaulting to 1.",
                 self.judge_rounds,
             )
-        logger.info("Fetching wiki outline for %s", self.repo)
-        outline_text = self._fetch_structure_text()
+        outline_text = self._offline_outline_text
+        wiki_markdown = self._offline_wiki_markdown
+        if outline_text is None or wiki_markdown is None:
+            logger.info("Fetching wiki outline for %s", self.repo)
+            outline_text = self._fetch_structure_text()
+            logger.info("Fetching wiki content for %s", self.repo)
+            pages = self._fetch_pages()
+        else:
+            pages = parse_wiki_markdown(wiki_markdown)
+            if not pages:
+                raise MCPError("Offline wiki markdown did not contain any pages.")
         outline_nodes = parse_outline_text(outline_text)
         if not outline_nodes:
             raise MCPError("DeepWiki outline response contained no entries.")
 
-        logger.info("Fetching wiki content for %s", self.repo)
-        pages = self._fetch_pages()
         dataset_chunks: List[DatasetChunk] = []
         subsection_results: List[SubsectionResult] = []
 

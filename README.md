@@ -55,11 +55,11 @@ python deepwiki_mcp_client.py \
   --narrative-format json \
   --narrative-modes code critic \
   --design-use-vllm \
-  --design-vllm-server-urls http://[fdbd:dccd:cdd2:2001::1c2]:8802/v1/chat/completions,http://[fdbd:dccd:cdd2:2001::1c7]:8802/v1/chat/completions \
+  --design-vllm-server-urls http://[2605:340:cd51:7700:d0e8:b2ba:f474:56d6]:8802/v1/chat/completions,http://[2605:340:cd51:7700:c1d:467e:ab2f:7edb]:8802/v1/chat/completions,http://[2605:340:cd51:7700:578f:acc4:bceb:432f]:8802/v1/chat/completions,http://[2605:340:cd51:7700:312e:6895:c534:7eb3]:8802/v1/chat/completions \
   --design-vllm-model gpt-oss-120b \
   --design-vllm-temperature 0.7 \
   --judge-use-llm \
-  --judge-vllm-server-urls http://[fdbd:dccd:cdd2:2001::1c2]:8802/v1/chat/completions,http://[fdbd:dccd:cdd2:2001::1c7]:8802/v1/chat/completions \
+  --judge-vllm-server-urls http://[2605:340:cd51:7700:d0e8:b2ba:f474:56d6]:8802/v1/chat/completions,http://[2605:340:cd51:7700:c1d:467e:ab2f:7edb]:8802/v1/chat/completions,http://[2605:340:cd51:7700:578f:acc4:bceb:432f]:8802/v1/chat/completions,http://[2605:340:cd51:7700:312e:6895:c534:7eb3]:8802/v1/chat/completions \
   --judge-vllm-model gpt-oss-120b \
   --judge-vllm-temperature 0.2 \
   --judge-max-rounds 1 \
@@ -77,17 +77,18 @@ python deepwiki_mcp_client.py \
     --narrative-format json \
     --narrative-modes code critic \
     --design-use-vllm \
-    --design-vllm-server-urls "http://[fdbd:dccd:cdd2:2001::1c2]:8000/v1/chat/completions,http://[fdbd:dccd:cdd2:2001::1c7]:8000/v1/chat/completions" \
-    --design-vllm-model gpt-oss-20b \
+    --design-vllm-server-urls "http://[2605:340:cd51:7700:2644:c93:43c2:a69c]:8000/v1/chat/completions" \
+    --design-vllm-model gpt-oss-120b \
     --design-vllm-temperature 0.7 \
     --judge-use-llm \
-    --judge-vllm-server-urls "http://[fdbd:dccd:cdd2:2001::1c2]:8000/v1/chat/completions,http://[fdbd:dccd:cdd2:2001::1c7]:8000/v1/chat/completions" \
-    --judge-vllm-model gpt-oss-20b \
+    --judge-vllm-server-urls "http://[2605:340:cd51:7700:2644:c93:43c2:a69c]:8000/v1/chat/completions" \
+    --judge-vllm-model gpt-oss-120b \
     --judge-vllm-temperature 0.2 \
     --judge-max-rounds 1 \
-    --repo-workers 16 \
-    --repo-batch-size 64 \
-    --max-workers 16
+    --repo-workers 1 \
+    --repo-batch-size 96 \
+    --max-workers 4 \
+    --hdfs-output-dir "hdfs://harunawl/home/byte_data_seed_wl/user/xingtianshun/deepwiki_data"
 ```
 --repo-workers 4：控制每个批次中最多同时处理几个仓库（也就是跨仓库的线程池规模）
 --repo-batch-size 64：把总体仓库列表切成每批最多 64 个，逐批顺序执行，避免一次性启动太多仓库
