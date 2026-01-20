@@ -7,6 +7,7 @@ import argparse
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import warnings
@@ -40,6 +41,7 @@ logger = logging.getLogger(__name__)
 class RepoTarget:
     repo: str
     commit: Optional[str] = None
+    hdfs_zip_path: Optional[str] = None
 
 
 def _print_tools(session: Session) -> None:
@@ -320,6 +322,67 @@ def _iter_parquet_rows(
                 yield {key: table[key][idx] for key in keys}
 
 
+def _load_parquet_rows_for_repos(
+    parquet_dir: Path,
+    *,
+    repo_names: Sequence[str],
+    columns: Sequence[str],
+    batch_size: int = 1024,
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Load specific repo rows from a DeepWiki parquet directory.
+
+    This function is optimized for large datasets: it only materializes `content`/`hdfs_path`
+    values for matched repos (avoids converting full batches to Python dicts).
+    """
+    desired = {name.strip() for name in repo_names if name and name.strip()}
+    if not desired:
+        return {}
+
+    try:
+        import pyarrow.parquet as pq  # type: ignore[import-not-found]
+    except ImportError as exc:  # pragma: no cover
+        raise MCPError(
+            "pyarrow is required for --parquet-input-dir. Install it with `pip install pyarrow`."
+        ) from exc
+
+    requested_columns = list(dict.fromkeys(["repo_name", *columns]))
+    part_files = sorted(
+        path for path in parquet_dir.iterdir() if path.is_file() and path.name.startswith("part-")
+    )
+    if not part_files:
+        raise MCPError(f"No part-* parquet files found under {parquet_dir}")
+
+    found: Dict[str, Dict[str, Any]] = {}
+    for part in part_files:
+        parquet_file = pq.ParquetFile(part)
+        for record_batch in parquet_file.iter_batches(batch_size=batch_size, columns=requested_columns):
+            try:
+                repo_idx = record_batch.schema.get_field_index("repo_name")
+            except Exception:
+                repo_idx = -1
+            if repo_idx < 0:
+                raise MCPError("Parquet dataset is missing required column: repo_name")
+            repo_values = record_batch.column(repo_idx).to_pylist()
+            if not repo_values:
+                continue
+            for row_idx, repo_name in enumerate(repo_values):
+                repo_key = str(repo_name or "").strip()
+                if not repo_key or repo_key not in desired or repo_key in found:
+                    continue
+                row: Dict[str, Any] = {"repo_name": repo_key}
+                for col_name in columns:
+                    col_idx = record_batch.schema.get_field_index(col_name)
+                    if col_idx < 0:
+                        row[col_name] = None
+                        continue
+                    row[col_name] = record_batch.column(col_idx)[row_idx].as_py()
+                found[repo_key] = row
+                if len(found) >= len(desired):
+                    return found
+    return found
+
+
 def _offline_outline_and_markdown_from_parquet_content(content: str) -> Tuple[str, str]:
     """
     Convert Parquet `content` (a JSON list of page objects) into:
@@ -356,6 +419,227 @@ def _offline_outline_and_markdown_from_parquet_content(content: str) -> Tuple[st
     if not outline_text or not wiki_markdown:
         raise MCPError("Failed to construct offline outline/wiki markdown from parquet content.")
     return outline_text, wiki_markdown
+
+
+def _discover_targets_from_parquet(
+    parquet_dir: Path,
+    *,
+    max_repos: Optional[int],
+    repo_prefix: Optional[str],
+    batch_size: int = 1024,
+) -> Tuple[List[RepoTarget], Dict[str, Dict[str, Any]]]:
+    """
+    Discover repo targets directly from the parquet dataset (no repos.txt needed).
+
+    Safety: callers should set either `max_repos` or require an explicit `--parquet-all`.
+    """
+    desired_prefix = repo_prefix.strip() if repo_prefix else None
+    columns = ["repo_name", "content", "hdfs_path", "error_message"]
+    targets: List[RepoTarget] = []
+    parquet_index: Dict[str, Dict[str, Any]] = {}
+
+    for row in _iter_parquet_rows(parquet_dir, columns=columns, batch_size=batch_size):
+        repo_name = str(row.get("repo_name") or "").strip()
+        if not repo_name:
+            continue
+        if desired_prefix and not repo_name.startswith(desired_prefix):
+            continue
+        if repo_name in parquet_index:
+            continue
+        if row.get("error_message"):
+            continue
+        content = str(row.get("content") or "")
+        hdfs_path = str(row.get("hdfs_path") or "").strip()
+        if not content or not hdfs_path:
+            continue
+        parquet_index[repo_name] = {
+            "repo_name": repo_name,
+            "content": content,
+            "hdfs_path": hdfs_path,
+        }
+        targets.append(RepoTarget(repo=repo_name))
+        if max_repos is not None and len(targets) >= max_repos:
+            break
+
+    return targets, parquet_index
+
+
+def _iter_parquet_rows_from_parts(
+    parquet_dir: Path,
+    *,
+    columns: Sequence[str],
+    batch_size: int,
+) -> Iterable[Dict[str, Any]]:
+    """
+    Stream parquet rows part-by-part with a controlled batch size.
+    Uses pyarrow record batches but converts each row to a small dict.
+    """
+    try:
+        import pyarrow.parquet as pq  # type: ignore[import-not-found]
+    except ImportError as exc:  # pragma: no cover
+        raise MCPError(
+            "pyarrow is required for --parquet-input-dir. Install it with `pip install pyarrow`."
+        ) from exc
+
+    part_files = sorted(
+        path for path in parquet_dir.iterdir() if path.is_file() and path.name.startswith("part-")
+    )
+    if not part_files:
+        raise MCPError(f"No part-* parquet files found under {parquet_dir}")
+
+    for part in part_files:
+        parquet_file = pq.ParquetFile(part)
+        for record_batch in parquet_file.iter_batches(batch_size=batch_size, columns=list(columns)):
+            table = record_batch.to_pydict()
+            if not table:
+                continue
+            keys = list(table.keys())
+            row_count = len(table[keys[0]]) if keys else 0
+            for idx in range(row_count):
+                yield {key: table[key][idx] for key in keys}
+
+
+def _run_parquet_stream(
+    *,
+    parquet_dir: Path,
+    args: argparse.Namespace,
+    design_config: Optional[NarrativeLLMConfig],
+    judge_config: Optional[JudgeLLMConfig],
+) -> None:
+    """
+    Process repos directly from parquet without building a full repo list in memory.
+
+    Intended for very large datasets (e.g. ~40w repos) with bounded memory and limited HDFS reads.
+    Concurrency is controlled by --repo-workers.
+    """
+    dataset_dir = Path(args.output_dir or "result_data").expanduser()
+    dataset_dir.mkdir(parents=True, exist_ok=True)
+
+    narrative_dir: Optional[Path] = None
+    narrative_modes: List[str] = []
+    merged_narrative_path: Optional[Path] = None
+    if args.narrative_output_dir:
+        narrative_dir = Path(args.narrative_output_dir).expanduser()
+        narrative_dir.mkdir(parents=True, exist_ok=True)
+        narrative_modes = _normalize_narrative_modes(args.narrative_modes)
+        if args.narrative_output:
+            merged_narrative_path = Path(args.narrative_output).expanduser()
+            merged_narrative_path.parent.mkdir(parents=True, exist_ok=True)
+
+    max_repos = None if args.parquet_all else args.parquet_max_repos
+    prefix = args.parquet_repo_prefix.strip() if args.parquet_repo_prefix else None
+    scan_batch_size = args.parquet_scan_batch_size or 64
+    should_skip_existing = bool(args.skip_existing)
+
+    cpu_default = os.cpu_count() or 4
+    repo_workers = args.repo_workers or max(1, cpu_default)
+    if repo_workers < 1:
+        raise MCPError("--repo-workers must be >= 1.")
+
+    total = max_repos if max_repos is not None else _parquet_total_rows(parquet_dir)
+    progress = tqdm(total=total, desc="Repositories", unit="repo", leave=True) if tqdm else None
+
+    processed = 0
+    errors: List[Tuple[str, Exception]] = []
+
+    def should_process_repo(repo_name: str) -> bool:
+        if not repo_name:
+            return False
+        if prefix and not repo_name.startswith(prefix):
+            return False
+        return True
+
+    def worker(repo_name: str, content: str, hdfs_path: str) -> None:
+        target = RepoTarget(repo=repo_name)
+        dataset_path = dataset_dir / _dataset_filename(target, as_json=args.output_format == "json")
+        narrative_path = None
+        if narrative_dir:
+            narrative_path = narrative_dir / _narrative_filename(target, fmt=args.narrative_format)
+
+        if should_skip_existing:
+            if dataset_path.exists() and (narrative_path is None or narrative_path.exists()):
+                return
+
+        _execute_pipeline_for_target(
+            session=None,
+            target=target,
+            args=args,
+            design_config=design_config,
+            judge_config=judge_config,
+            dataset_path=dataset_path,
+            narrative_path=narrative_path,
+            narrative_modes=narrative_modes,
+            print_to_stdout=False,
+            parquet_row={"repo_name": repo_name, "content": content, "hdfs_path": hdfs_path},
+        )
+
+    with ThreadPoolExecutor(max_workers=repo_workers) as executor:
+        in_flight: Dict[Any, str] = {}
+        for row in _iter_parquet_rows_from_parts(
+            parquet_dir,
+            columns=["repo_name", "content", "hdfs_path", "error_message"],
+            batch_size=scan_batch_size,
+        ):
+            repo_name = str(row.get("repo_name") or "").strip()
+            if not should_process_repo(repo_name):
+                if progress is not None:
+                    progress.update(1)
+                continue
+            if row.get("error_message"):
+                if progress is not None:
+                    progress.update(1)
+                continue
+            content = str(row.get("content") or "")
+            hdfs_path = str(row.get("hdfs_path") or "").strip()
+            if not content or not hdfs_path:
+                if progress is not None:
+                    progress.update(1)
+                continue
+
+            while len(in_flight) >= repo_workers:
+                for future in as_completed(list(in_flight.keys())):
+                    finished_repo = in_flight.pop(future)
+                    try:
+                        future.result()
+                    except Exception as exc:
+                        logger.error("Repository %s failed: %s", finished_repo, exc)
+                        errors.append((finished_repo, exc))
+                    processed += 1
+                    if progress is not None:
+                        progress.update(1)
+                    break
+
+            future = executor.submit(worker, repo_name, content, hdfs_path)
+            in_flight[future] = repo_name
+
+            if max_repos is not None and processed + len(in_flight) >= max_repos:
+                break
+
+        for future in as_completed(in_flight):
+            finished_repo = in_flight[future]
+            try:
+                future.result()
+            except Exception as exc:
+                logger.error("Repository %s failed: %s", finished_repo, exc)
+                errors.append((finished_repo, exc))
+            processed += 1
+            if progress is not None:
+                progress.update(1)
+
+    if progress is not None:
+        progress.close()
+
+    if merged_narrative_path and narrative_dir and narrative_modes and not errors:
+        _merge_narrative_outputs(
+            narrative_dir=narrative_dir,
+            destination=merged_narrative_path,
+            fmt=args.narrative_format,
+        )
+        logger.info("Wrote merged narrative output to %s", merged_narrative_path)
+
+    if errors:
+        failed = ", ".join(name for name, _ in errors[:10])
+        raise MCPError(f"Failed to process repositories (showing up to 10): {failed}")
 
 
 def _download_and_extract_repo_zip_cached(
@@ -525,6 +809,10 @@ def _parse_repo_target(raw: str, default_commit: Optional[str]) -> RepoTarget:
     cleaned = raw.strip()
     if not cleaned:
         raise MCPError("Encountered empty repository identifier.")
+    cleaned = cleaned.rstrip("@").strip()
+    if cleaned.startswith("hdfs://") and cleaned.endswith(".zip"):
+        repo, commit = _repo_from_hdfs_zip_path(cleaned)
+        return RepoTarget(repo=repo, commit=commit or default_commit, hdfs_zip_path=cleaned)
     repo = cleaned
     commit = default_commit
     if "@" in cleaned:
@@ -536,6 +824,32 @@ def _parse_repo_target(raw: str, default_commit: Optional[str]) -> RepoTarget:
     if not repo:
         raise MCPError(f"Invalid repository specification: '{raw}'")
     return RepoTarget(repo=repo, commit=commit)
+
+
+def _repo_from_hdfs_zip_path(hdfs_zip_path: str) -> Tuple[str, Optional[str]]:
+    """
+    Parse `hdfs://.../<owner>_<repo>_<suffix>.zip` into `owner/repo`.
+
+    This is a best-effort heuristic for DeepWiki repo zips, where the last underscore
+    segment is usually a short commit/hash. Repository names containing underscores
+    are supported because we only treat the final segment as the suffix.
+    """
+    basename = hdfs_zip_path.rsplit("/", 1)[-1]
+    if basename.lower().endswith(".zip"):
+        basename = basename[:-4]
+    parts = [p for p in basename.split("_") if p]
+    if len(parts) < 2:
+        raise MCPError(f"Cannot infer repo name from hdfs zip path: {hdfs_zip_path}")
+    owner = parts[0]
+    commit = None
+    if len(parts) >= 3:
+        commit = parts[-1]
+        repo_name = "_".join(parts[1:-1])
+    else:
+        repo_name = parts[1]
+    if not owner or not repo_name:
+        raise MCPError(f"Cannot infer repo name from hdfs zip path: {hdfs_zip_path}")
+    return f"{owner}/{repo_name}", commit or None
 
 
 def _repo_slug(target: RepoTarget) -> str:
@@ -613,6 +927,8 @@ def _execute_pipeline_for_target(
     parquet_row: Optional[Dict[str, Any]] = None,
 ) -> PipelineOutput:
     progress_needed = dataset_path is not None or (narrative_path is not None and narrative_modes)
+    cache_cleanup_dir: Optional[Path] = None
+    finished_ok = False
 
     def persist_progress(partial_output: PipelineOutput) -> None:
         _persist_outputs(
@@ -625,80 +941,97 @@ def _execute_pipeline_for_target(
             log_writes=False,
         )
 
-    outline_text = None
-    wiki_markdown = None
-    repo_root = None
+    try:
+        outline_text = None
+        wiki_markdown = None
+        repo_root = None
 
-    if args.parquet_input_dir:
-        parquet_dir = Path(args.parquet_input_dir).expanduser()
-        desired_repo = target.repo
-        found_row = parquet_row
-        if found_row is None:
-            for row in _iter_parquet_rows(parquet_dir, columns=["repo_name", "content", "hdfs_path"]):
-                if str(row.get("repo_name") or "").strip() == desired_repo:
-                    found_row = row
-                    break
-        if found_row is None:
-            raise MCPError(f"Repo '{desired_repo}' not found under parquet directory {parquet_dir}")
+        if args.parquet_input_dir:
+            parquet_dir = Path(args.parquet_input_dir).expanduser()
+            desired_repo = target.repo
+            found_row = parquet_row
+            if found_row is None:
+                matches = _load_parquet_rows_for_repos(
+                    parquet_dir,
+                    repo_names=[desired_repo],
+                    columns=["content", "hdfs_path"],
+                    batch_size=args.parquet_scan_batch_size or 1024,
+                )
+                found_row = matches.get(desired_repo)
+            if found_row is None:
+                raise MCPError(f"Repo '{desired_repo}' not found under parquet directory {parquet_dir}")
 
-        content = str(found_row.get("content") or "")
-        outline_text, wiki_markdown = _offline_outline_and_markdown_from_parquet_content(content)
+            content = str(found_row.get("content") or "")
+            outline_text, wiki_markdown = _offline_outline_and_markdown_from_parquet_content(content)
 
-        hdfs_zip_path = str(found_row.get("hdfs_path") or "").strip()
-        if not hdfs_zip_path:
-            raise MCPError(f"Missing hdfs_path for repo {desired_repo} in parquet dataset.")
+            hdfs_zip_path = str(found_row.get("hdfs_path") or "").strip()
+            if not hdfs_zip_path:
+                raise MCPError(f"Missing hdfs_path for repo {desired_repo} in parquet dataset.")
 
-        cache_base = Path(args.repo_cache_dir or "/tmp/deepwiki_repo_cache").expanduser()
-        repo_extract_dir = cache_base / _repo_slug(target)
-        repo_root = _download_and_extract_repo_zip_cached(
-            hdfs_zip_path=hdfs_zip_path,
-            extract_dir=repo_extract_dir,
+            cache_base = Path(args.repo_cache_dir or "/tmp/deepwiki_repo_cache").expanduser()
+            repo_extract_dir = cache_base / _repo_slug(target)
+            cache_cleanup_dir = repo_extract_dir
+            repo_root = _download_and_extract_repo_zip_cached(
+                hdfs_zip_path=hdfs_zip_path,
+                extract_dir=repo_extract_dir,
+                hdfs_bin=args.hdfs_bin,
+            )
+
+        pipeline = DeepWikiPipeline(
+            session=session,
+            repo=target.repo,
+            logic_llm_config=design_config,
+            critic_llm_config=judge_config,
+            repo_commit=None if args.parquet_input_dir else target.commit,
+            allow_git_clone=not bool(args.parquet_input_dir),
+            show_page_progress=False,
+            judge_rounds=args.judge_max_rounds,
+            repo_root=repo_root,
+            max_pages=args.max_pages,
+            max_sections_per_page=args.max_sections_per_page,
+            max_workers=args.max_workers,
+            skip_pages=args.skip_page,
+        )
+        output = pipeline.run(
+            progress_callback=persist_progress if progress_needed else None,
+            outline_text=outline_text,
+            wiki_markdown=wiki_markdown,
+        )
+
+        _persist_outputs(
+            output,
+            dataset_path=dataset_path,
+            narrative_path=narrative_path,
+            output_format=args.output_format,
+            narrative_modes=narrative_modes,
+            narrative_format=args.narrative_format,
+            log_writes=True,
+        )
+        _maybe_upload_repo_outputs_to_hdfs(
+            target=target,
+            dataset_path=dataset_path,
+            narrative_path=narrative_path,
+            output_format=args.output_format,
+            narrative_modes=narrative_modes,
+            hdfs_output_dir=args.hdfs_output_dir,
             hdfs_bin=args.hdfs_bin,
         )
 
-    pipeline = DeepWikiPipeline(
-        session=session,
-        repo=target.repo,
-        logic_llm_config=design_config,
-        critic_llm_config=judge_config,
-        repo_commit=None if args.parquet_input_dir else target.commit,
-        judge_rounds=args.judge_max_rounds,
-        repo_root=repo_root,
-        max_pages=args.max_pages,
-        max_sections_per_page=args.max_sections_per_page,
-        max_workers=args.max_workers,
-        skip_pages=args.skip_page,
-    )
-    output = pipeline.run(
-        progress_callback=persist_progress if progress_needed else None,
-        outline_text=outline_text,
-        wiki_markdown=wiki_markdown,
-    )
+        if dataset_path is None and print_to_stdout:
+            rendered = _render_dataset_output(output, as_json=args.output_format == "json")
+            _write_or_print(rendered, None)
 
-    _persist_outputs(
-        output,
-        dataset_path=dataset_path,
-        narrative_path=narrative_path,
-        output_format=args.output_format,
-        narrative_modes=narrative_modes,
-        narrative_format=args.narrative_format,
-        log_writes=True,
-    )
-    _maybe_upload_repo_outputs_to_hdfs(
-        target=target,
-        dataset_path=dataset_path,
-        narrative_path=narrative_path,
-        output_format=args.output_format,
-        narrative_modes=narrative_modes,
-        hdfs_output_dir=args.hdfs_output_dir,
-        hdfs_bin=args.hdfs_bin,
-    )
-
-    if dataset_path is None and print_to_stdout:
-        rendered = _render_dataset_output(output, as_json=args.output_format == "json")
-        _write_or_print(rendered, None)
-
-    return output
+        finished_ok = True
+        return output
+    finally:
+        if not args.parquet_input_dir:
+            return
+        if not cache_cleanup_dir:
+            return
+        cleanup_mode = getattr(args, "repo_cache_cleanup", "never")
+        should_cleanup = cleanup_mode == "always" or (cleanup_mode == "on-success" and finished_ok)
+        if should_cleanup:
+            shutil.rmtree(cache_cleanup_dir, ignore_errors=True)
 
 
 def _run_multi_repo_batch(
@@ -707,6 +1040,7 @@ def _run_multi_repo_batch(
     args: argparse.Namespace,
     design_config: Optional[NarrativeLLMConfig],
     judge_config: Optional[JudgeLLMConfig],
+    parquet_index_override: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> None:
     if not targets:
         return
@@ -718,6 +1052,11 @@ def _run_multi_repo_batch(
         narrative_dir = Path(args.narrative_output_dir).expanduser()
         narrative_dir.mkdir(parents=True, exist_ok=True)
         narrative_modes = _normalize_narrative_modes(args.narrative_modes)
+        if args.narrative_output:
+            merged_narrative_path = Path(args.narrative_output).expanduser()
+            merged_narrative_path.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            merged_narrative_path = None
 
     batch_size = args.repo_batch_size or len(targets)
     if batch_size < 1:
@@ -731,15 +1070,26 @@ def _run_multi_repo_batch(
 
     errors: List[Tuple[RepoTarget, Exception]] = []
     parquet_dir: Optional[Path] = None
-    parquet_index: Dict[str, Dict[str, Any]] = {}
-    if args.parquet_input_dir:
+    parquet_index: Dict[str, Dict[str, Any]] = parquet_index_override or {}
+    if args.parquet_input_dir and not parquet_index_override:
         parquet_dir = Path(args.parquet_input_dir).expanduser()
-        logger.info("Indexing parquet dataset rows by repo_name from %s", parquet_dir)
-        for row in _iter_parquet_rows(parquet_dir, columns=["repo_name", "content", "hdfs_path"]):
-            repo_name = str(row.get("repo_name") or "").strip()
-            if repo_name and repo_name not in parquet_index:
-                parquet_index[repo_name] = row
-        logger.info("Indexed %d repos from parquet dataset.", len(parquet_index))
+        desired_repos = sorted({target.repo for target in targets})
+        logger.info(
+            "Loading parquet rows for %d requested repos from %s",
+            len(desired_repos),
+            parquet_dir,
+        )
+        parquet_index = _load_parquet_rows_for_repos(
+            parquet_dir,
+            repo_names=desired_repos,
+            columns=["content", "hdfs_path"],
+            batch_size=args.parquet_scan_batch_size or 1024,
+        )
+        logger.info(
+            "Loaded %d/%d requested repos from parquet dataset.",
+            len(parquet_index),
+            len(desired_repos),
+        )
 
     total_batches = (len(targets) + batch_size - 1) // batch_size
     overall_bar = (
@@ -808,10 +1158,55 @@ def _run_multi_repo_batch(
     if overall_bar:
         overall_bar.close()
 
+    if merged_narrative_path and narrative_dir and narrative_modes and not errors:
+        _merge_narrative_outputs(
+            narrative_dir=narrative_dir,
+            destination=merged_narrative_path,
+            fmt=args.narrative_format,
+        )
+        logger.info("Wrote merged narrative output to %s", merged_narrative_path)
+
     if errors:
         failed_repos = ", ".join(item.repo for item, _ in errors)
         primary = errors[0][1]
         raise MCPError(f"Failed to process repositories: {failed_repos}") from primary
+
+
+def _merge_narrative_outputs(*, narrative_dir: Path, destination: Path, fmt: str) -> None:
+    if fmt == "json":
+        candidates = sorted(narrative_dir.glob("*_narratives.jsonl"))
+        if not candidates:
+            raise MCPError(f"No narrative outputs found under {narrative_dir}")
+        with destination.open("w", encoding="utf-8") as out:
+            for path in candidates:
+                text = path.read_text(encoding="utf-8")
+                if text and not text.endswith("\n"):
+                    text += "\n"
+                out.write(text)
+        return
+
+    # text format
+    candidates = sorted(narrative_dir.glob("*_narratives.txt"))
+    if not candidates:
+        raise MCPError(f"No narrative outputs found under {narrative_dir}")
+    parts: List[str] = []
+    for path in candidates:
+        parts.append(path.read_text(encoding="utf-8").rstrip())
+    destination.write_text("\n\n".join(parts).strip() + "\n", encoding="utf-8")
+
+
+def _parquet_total_rows(parquet_dir: Path) -> int:
+    try:
+        import pyarrow.parquet as pq  # type: ignore[import-not-found]
+    except ImportError as exc:  # pragma: no cover
+        raise MCPError(
+            "pyarrow is required for --parquet-input-dir. Install it with `pip install pyarrow`."
+        ) from exc
+    total = 0
+    for part in sorted(path for path in parquet_dir.iterdir() if path.is_file() and path.name.startswith("part-")):
+        parquet_file = pq.ParquetFile(part)
+        total += int(parquet_file.metadata.num_rows)
+    return total
 
 
 def _build_design_llm_config(args: argparse.Namespace) -> NarrativeLLMConfig:
@@ -870,16 +1265,28 @@ def _load_prompt(prompt_arg: Optional[str], *, description: str) -> Optional[str
     return prompt_arg
 
 
-def _configure_logging(level: str) -> None:
+def _configure_logging(level: str, *, suppress_warnings: bool) -> None:
+    class _DropWarningFilter(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:  # type: ignore[override]
+            return record.levelno != logging.WARNING
+
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+    if suppress_warnings:
+        root = logging.getLogger()
+        for handler in root.handlers:
+            handler.addFilter(_DropWarningFilter())
     for name in ("LiteLLM", "LiteLLM Router"):
         lite_logger = logging.getLogger(name)
         lite_logger.setLevel(logging.WARNING)
         lite_logger.propagate = False
     warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
+
+
+def _disable_all_logging() -> None:
+    logging.disable(logging.CRITICAL)
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
@@ -1055,12 +1462,58 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--parquet-all",
+        action="store_true",
+        help=(
+            "When --parquet-input-dir is set and --generate-dataset is omitted, process all repos "
+            "found in parquet (dangerous for very large datasets)."
+        ),
+    )
+    parser.add_argument(
+        "--parquet-max-repos",
+        type=int,
+        default=None,
+        help=(
+            "When --parquet-input-dir is set and --generate-dataset is omitted, process only the "
+            "first N repos discovered in parquet."
+        ),
+    )
+    parser.add_argument(
+        "--parquet-repo-prefix",
+        type=str,
+        default=None,
+        help=(
+            "Optional repo_name prefix filter when discovering targets from parquet "
+            "(e.g. 'org/' or 'org/repo')."
+        ),
+    )
+    parser.add_argument(
+        "--parquet-scan-batch-size",
+        type=int,
+        default=64,
+        help="Batch size used when scanning parquet for repos (smaller uses less memory).",
+    )
+    parser.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="Skip repos that already have outputs in --output-dir/--narrative-output-dir.",
+    )
+    parser.add_argument(
         "--repo-cache-dir",
         type=str,
         default=None,
         help=(
             "Directory to cache extracted repository zips when --parquet-input-dir is set "
             "(default: /tmp/deepwiki_repo_cache)."
+        ),
+    )
+    parser.add_argument(
+        "--repo-cache-cleanup",
+        choices=["never", "on-success", "always"],
+        default="never",
+        help=(
+            "Whether to delete the extracted repo cache directory after processing each repository "
+            "in parquet mode (default: never)."
         ),
     )
     parser.add_argument(
@@ -1084,11 +1537,25 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         default="INFO",
         help="Logging verbosity (default: INFO).",
     )
+    parser.add_argument(
+        "--suppress-warning-logs",
+        action="store_true",
+        help="Suppress WARNING-level log lines (only ERROR/INFO/DEBUG remain).",
+    )
+    parser.add_argument(
+        "--progress-only",
+        action="store_true",
+        help="Suppress all log output so only the repository progress bar remains.",
+    )
     return parser.parse_args(argv)
 
 
 def validate_args(args: argparse.Namespace, targets: Sequence[RepoTarget]) -> None:
-    has_generation = bool(targets)
+    has_generation = bool(targets) or bool(
+        args.parquet_input_dir
+        and args.generate_dataset is None
+        and (args.parquet_all or args.parquet_max_repos is not None)
+    )
     if args.output and not has_generation:
         raise MCPError("--output can only be used with --generate-dataset.")
     if args.output_format != "text" and not has_generation:
@@ -1103,8 +1570,12 @@ def validate_args(args: argparse.Namespace, targets: Sequence[RepoTarget]) -> No
         raise MCPError("--judge-vllm-model is required when --judge-use-llm is set.")
     if args.narrative_output and not has_generation:
         raise MCPError("--narrative-output requires --generate-dataset.")
-    if args.narrative_modes and not args.narrative_output:
-        raise MCPError("--narrative-modes requires --narrative-output.")
+    if args.narrative_modes and not (args.narrative_output or args.narrative_output_dir):
+        raise MCPError("--narrative-modes requires --narrative-output or --narrative-output-dir.")
+    if args.narrative_output:
+        narrative_path = Path(args.narrative_output).expanduser()
+        if narrative_path.exists() and narrative_path.is_dir():
+            raise MCPError(f"--narrative-output must be a file path, got directory: {narrative_path}")
     if args.judge_max_rounds < 1:
         raise MCPError("--judge-max-rounds must be >= 1.")
     if args.max_pages is not None and args.max_pages < 1:
@@ -1128,12 +1599,28 @@ def validate_args(args: argparse.Namespace, targets: Sequence[RepoTarget]) -> No
         parquet_dir = Path(args.parquet_input_dir).expanduser()
         if not parquet_dir.exists() or not parquet_dir.is_dir():
             raise MCPError(f"--parquet-input-dir does not exist or is not a directory: {parquet_dir}")
+        if not has_generation and not args.parquet_all and args.parquet_max_repos is None:
+            raise MCPError(
+                "When using --parquet-input-dir without --generate-dataset, "
+                "provide --parquet-max-repos (recommended) or --parquet-all."
+            )
+        if args.parquet_max_repos is not None and args.parquet_max_repos < 1:
+            raise MCPError("--parquet-max-repos must be >= 1 when provided.")
+        if args.parquet_scan_batch_size is not None and args.parquet_scan_batch_size < 1:
+            raise MCPError("--parquet-scan-batch-size must be >= 1 when provided.")
 
 
 def main(argv: Optional[List[str]] = None) -> None:
     args = parse_args(argv)
-    _configure_logging(args.log_level)
+    _configure_logging(args.log_level, suppress_warnings=args.suppress_warning_logs)
+    if args.progress_only:
+        _disable_all_logging()
     repo_targets = _resolve_repo_targets(args)
+    is_parquet_discovery_mode = bool(
+        args.parquet_input_dir
+        and args.generate_dataset is None
+        and (args.parquet_all or args.parquet_max_repos is not None)
+    )
     try:
         validate_args(args, repo_targets)
     except MCPError as exc:
@@ -1168,9 +1655,6 @@ def main(argv: Optional[List[str]] = None) -> None:
                 contains=args.contains,
             )
 
-        if not repo_targets:
-            return
-
         design_config = _build_design_llm_config(args) if args.design_use_vllm else None
         judge_system_prompt = _load_prompt(
             args.judge_system_prompt,
@@ -1181,6 +1665,19 @@ def main(argv: Optional[List[str]] = None) -> None:
             if args.judge_use_llm
             else None
         )
+
+        if is_parquet_discovery_mode:
+            parquet_dir = Path(args.parquet_input_dir).expanduser()
+            _run_parquet_stream(
+                parquet_dir=parquet_dir,
+                args=args,
+                design_config=design_config,
+                judge_config=judge_config,
+            )
+            return
+
+        if not repo_targets:
+            return
 
         dataset_path: Optional[Path] = Path(args.output) if args.output else None
         narrative_path: Optional[Path] = (
@@ -1214,6 +1711,7 @@ def main(argv: Optional[List[str]] = None) -> None:
                 args=args,
                 design_config=design_config,
                 judge_config=judge_config,
+                parquet_index_override=preloaded_parquet_index,
             )
     except MCPError as exc:
         logger.error("%s", exc)

@@ -51,6 +51,8 @@ class DeepWikiPipeline:
         repo_commit: Optional[str] = None,
         judge_rounds: int = 1,
         repo_root: Optional[Path] = None,
+        allow_git_clone: bool = True,
+        show_page_progress: bool = True,
         max_pages: Optional[int] = None,
         max_sections_per_page: Optional[int] = None,
         max_workers: Optional[int] = None,
@@ -63,6 +65,8 @@ class DeepWikiPipeline:
         self.repo_commit = repo_commit
         self.judge_rounds = judge_rounds
         self.repo_root = repo_root.resolve() if repo_root else None
+        self.allow_git_clone = allow_git_clone
+        self.show_page_progress = show_page_progress
         self.max_pages = max_pages if max_pages and max_pages > 0 else None
         self.max_sections_per_page = (
             max_sections_per_page if max_sections_per_page and max_sections_per_page > 0 else None
@@ -227,7 +231,7 @@ class DeepWikiPipeline:
                 unit="page",
                 leave=False,
             )
-            if tqdm and total_pages > 0
+            if self.show_page_progress and tqdm and total_pages > 0
             else None
         )
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -394,6 +398,11 @@ class DeepWikiPipeline:
             return self.repo_root
         if self._managed_repo_root:
             return self._managed_repo_root
+        if not self.allow_git_clone:
+            raise MCPError(
+                "GitHub cloning is disabled. Provide `repo_root` (e.g. extracted zip directory) "
+                "or use the parquet workflow that supplies repository sources via `hdfs_path`."
+            )
         if not shutil.which("git"):
             raise MCPError("git is required to clone repository sources.")
         temp_parent = Path(tempfile.mkdtemp(prefix="deepwiki_repo_"))

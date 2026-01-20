@@ -69,26 +69,42 @@ python deepwiki_mcp_client.py \
 ## 批量运行示例
 
 ```bash
+   
+
+
+
+
+
+
+
+
+
+
+
+
+
 python deepwiki_mcp_client.py \
-    --generate-dataset @repos.txt \
-    --narrative-output result_data/batch_outputs \
-    --output-format text \
-    --narrative-output-dir result_data/batch_narratives \
-    --narrative-format json \
-    --narrative-modes code critic \
-    --design-use-vllm \
-    --design-vllm-server-urls "http://[2605:340:cd51:7700:2644:c93:43c2:a69c]:8000/v1/chat/completions" \
-    --design-vllm-model gpt-oss-120b \
-    --design-vllm-temperature 0.7 \
-    --judge-use-llm \
-    --judge-vllm-server-urls "http://[2605:340:cd51:7700:2644:c93:43c2:a69c]:8000/v1/chat/completions" \
-    --judge-vllm-model gpt-oss-120b \
-    --judge-vllm-temperature 0.2 \
-    --judge-max-rounds 1 \
-    --repo-workers 1 \
-    --repo-batch-size 96 \
-    --max-workers 4 \
-    --hdfs-output-dir "hdfs://harunawl/home/byte_data_seed_wl/user/xingtianshun/deepwiki_data"
+   --parquet-all \
+   --narrative-output-dir result_data/batch_narratives \
+   --narrative-format json \
+   --skip-existing \
+   --narrative-modes code critic \
+   --parquet-input-dir /mnt/hdfs/userx/shanyong/code/code_wiki/deepwiki \
+   --repo-cache-dir /tmp/deepwiki_repo_cache \
+   --design-use-vllm \
+   --design-vllm-server-urls "http://[2605:340:cd51:7700:6a13:2732:80b:4c3f]:8000/v1/chat/completions,http://[2605:340:cd51:7700:252d:80ad:d92f:2693]:8000/v1/chat/completions,http://[2605:340:cd51:7700:6950:a577:5c0c:3adf]:8000/v1/chat/completions,http://[2605:340:cd51:7700:67ad:a422:7e17:65cd]:8000/v1/chat/completions,http://[2605:340:cd51:7700:14bd:17a4:9c14:c0ec]:8000/v1/chat/completions,http://[2605:340:cd51:7700:c75f:185d:2887:448]:8000/v1/chat/completions,http://[2605:340:cd51:7700:49c1:5b05:6a33:b925]:8000/v1/chat/completions,http://[2605:340:cd51:7700:27e9:afe2:15f3:544e]:8000/v1/chat/completions,http://[2605:340:cd51:7700:dc:253:b68f:924e]:8000/v1/chat/completions,http://[2605:340:cd51:7700:a35a:907d:7527:da6e]:8000/v1/chat/completions,http://[2605:340:cd51:7700:12bb:b18b:393d:ba53]:8000/v1/chat/completions,http://[2605:340:cd51:7700:d46b:9a9a:a4df:c127]:8000/v1/chat/completions" \
+   --design-vllm-model gpt-oss-120b \
+   --design-vllm-temperature 0.7 \
+   --judge-use-llm \
+   --judge-vllm-server-urls "http://[2605:340:cd51:7700:6a13:2732:80b:4c3f]:8000/v1/chat/completions,http://[2605:340:cd51:7700:252d:80ad:d92f:2693]:8000/v1/chat/completions,http://[2605:340:cd51:7700:6950:a577:5c0c:3adf]:8000/v1/chat/completions,http://[2605:340:cd51:7700:67ad:a422:7e17:65cd]:8000/v1/chat/completions,http://[2605:340:cd51:7700:14bd:17a4:9c14:c0ec]:8000/v1/chat/completions,http://[2605:340:cd51:7700:c75f:185d:2887:448]:8000/v1/chat/completions,http://[2605:340:cd51:7700:49c1:5b05:6a33:b925]:8000/v1/chat/completions,http://[2605:340:cd51:7700:27e9:afe2:15f3:544e]:8000/v1/chat/completions,http://[2605:340:cd51:7700:dc:253:b68f:924e]:8000/v1/chat/completions,http://[2605:340:cd51:7700:a35a:907d:7527:da6e]:8000/v1/chat/completions,http://[2605:340:cd51:7700:12bb:b18b:393d:ba53]:8000/v1/chat/completions,http://[2605:340:cd51:7700:d46b:9a9a:a4df:c127]:8000/v1/chat/completions" \
+   --judge-vllm-model gpt-oss-120b \
+   --judge-vllm-temperature 0.2 \
+   --judge-max-rounds 1 \
+   --parquet-scan-batch-size 128 \
+   --repo-workers 128 \
+   --max-workers 20 \
+   --repo-cache-cleanup on-success \
+   --hdfs-output-dir "hdfs://harunawl/home/byte_data_seed_wl/user/xingtianshun/deepwiki_data"
 ```
 --repo-workers 4：控制每个批次中最多同时处理几个仓库（也就是跨仓库的线程池规模）
 --repo-batch-size 64：把总体仓库列表切成每批最多 64 个，逐批顺序执行，避免一次性启动太多仓库
@@ -107,3 +123,12 @@ python token_count_local.py \
   --tokenizer-path /mnt/hdfs/tiktok_aiic_new/user/codeai/hf_models/Qwen2.5-32B-Instruct \
   --add-special-tokens
 
+python utils/vllm_load_test.py \
+   --urls "http://[2605:340:cd51:7700:cd6d:b7d4:77a1:d61e]:8000/v1/chat/completions" \
+   --model gpt-oss-120b \
+   --prompt "Summarize: hello world." \
+   --max-tokens 131072 \
+   --temperature 0.2 \
+   --warmup 5 \
+   --requests 50 \
+   --concurrency 16

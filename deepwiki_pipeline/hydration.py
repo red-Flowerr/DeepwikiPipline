@@ -15,6 +15,7 @@ BracketKey = Tuple[str, int, int]
 
 PATH_RANGE_RE = re.compile(r"([A-Za-z0-9_.\-/]+):(\d+)(?:-(\d+))?")
 PATH_ALLOWED_RE = re.compile(r"^[A-Za-z0-9_.\-/]+$")
+MAX_PATH_LEN = 240
 DETAILS_BLOCK_RE = re.compile(
     r"<details\b[^>]*?>.*?</details>",
     re.IGNORECASE | re.DOTALL,
@@ -58,20 +59,29 @@ def _normalise_path(path: str) -> str:
 
 
 def _is_valid_path(path: str) -> bool:
-    return (
-        bool(path)
-        and not path.startswith("-")
-        and "*" not in path
-        and " " not in path
-        and PATH_ALLOWED_RE.match(path) is not None
-    )
+    if (
+        not path
+        or path.startswith("-")
+        or "*" in path
+        or " " in path
+        or len(path) > MAX_PATH_LEN
+    ):
+        return False
+    if PATH_ALLOWED_RE.match(path) is None:
+        return False
+    # Avoid interpreting extremely long "words" (e.g. biological sequences) as paths.
+    # Most repo paths contain at least one separator or a suffix.
+    if "/" not in path and "." not in path:
+        return False
+    # Also reject path segments that are wildly long (common for generated blobs).
+    if any(len(part) > 160 for part in path.split("/")):
+        return False
+    return True
 
 
 def _full_reference(path: str) -> Optional[BracketKey]:
     cleaned = _normalise_path(path)
     if not _is_valid_path(cleaned):
-        return None
-    if "/" not in cleaned and "." not in cleaned:
         return None
     return cleaned, 1, 0
 
