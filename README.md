@@ -92,23 +92,29 @@ python deepwiki_mcp_client.py \
    --parquet-input-dir /mnt/hdfs/userx/shanyong/code/code_wiki/deepwiki \
    --repo-cache-dir /tmp/deepwiki_repo_cache \
    --design-use-vllm \
-   --design-vllm-server-urls "http://[2605:340:cd51:7700:6a13:2732:80b:4c3f]:8000/v1/chat/completions,http://[2605:340:cd51:7700:252d:80ad:d92f:2693]:8000/v1/chat/completions,http://[2605:340:cd51:7700:6950:a577:5c0c:3adf]:8000/v1/chat/completions,http://[2605:340:cd51:7700:67ad:a422:7e17:65cd]:8000/v1/chat/completions,http://[2605:340:cd51:7700:14bd:17a4:9c14:c0ec]:8000/v1/chat/completions,http://[2605:340:cd51:7700:c75f:185d:2887:448]:8000/v1/chat/completions,http://[2605:340:cd51:7700:49c1:5b05:6a33:b925]:8000/v1/chat/completions,http://[2605:340:cd51:7700:27e9:afe2:15f3:544e]:8000/v1/chat/completions,http://[2605:340:cd51:7700:dc:253:b68f:924e]:8000/v1/chat/completions,http://[2605:340:cd51:7700:a35a:907d:7527:da6e]:8000/v1/chat/completions,http://[2605:340:cd51:7700:12bb:b18b:393d:ba53]:8000/v1/chat/completions,http://[2605:340:cd51:7700:d46b:9a9a:a4df:c127]:8000/v1/chat/completions" \
+   --design-vllm-server-urls "http://[2605:340:cd51:7700:d1a8:e5a:c6f2:f04b]:8000/v1/chat/completions,http://[2605:340:cd51:7700:3b3:f4f8:7745:27ca]:8000/v1/chat/completions,http://[2605:340:cd51:7700:4dbb:8442:2205:10a]:8000/v1/chat/completions,http://[2605:340:cd51:7700:3a1e:8a48:6bd2:296a]:8000/v1/chat/completions,http://[2605:340:cd51:7700:50fb:5128:d2e6:5f69]:8000/v1/chat/completions,http://[2605:340:cd51:7700:98f4:41cd:eb1e:e980]:8000/v1/chat/completions,http://[2605:340:cd51:7700:9490:9c8b:1fe4:c75a]:8000/v1/chat/completions,http://[2605:340:cd51:7700:48b8:d963:9843:9b6b]:8000/v1/chat/completions,http://[2605:340:cd51:7700:a4ea:daa0:bf3:a09a]:8000/v1/chat/completions,http://[2605:340:cd51:7700:c4cf:571d:3e0c:471b]:8000/v1/chat/completions,http://[2605:340:cd51:7700:765a:b754:5b1:fa80]:8000/v1/chat/completions,http://[2605:340:cd51:7700:17a4:e75:c897:cea4]:8000/v1/chat/completions" \
    --design-vllm-model gpt-oss-120b \
    --design-vllm-temperature 0.7 \
    --judge-use-llm \
-   --judge-vllm-server-urls "http://[2605:340:cd51:7700:6a13:2732:80b:4c3f]:8000/v1/chat/completions,http://[2605:340:cd51:7700:252d:80ad:d92f:2693]:8000/v1/chat/completions,http://[2605:340:cd51:7700:6950:a577:5c0c:3adf]:8000/v1/chat/completions,http://[2605:340:cd51:7700:67ad:a422:7e17:65cd]:8000/v1/chat/completions,http://[2605:340:cd51:7700:14bd:17a4:9c14:c0ec]:8000/v1/chat/completions,http://[2605:340:cd51:7700:c75f:185d:2887:448]:8000/v1/chat/completions,http://[2605:340:cd51:7700:49c1:5b05:6a33:b925]:8000/v1/chat/completions,http://[2605:340:cd51:7700:27e9:afe2:15f3:544e]:8000/v1/chat/completions,http://[2605:340:cd51:7700:dc:253:b68f:924e]:8000/v1/chat/completions,http://[2605:340:cd51:7700:a35a:907d:7527:da6e]:8000/v1/chat/completions,http://[2605:340:cd51:7700:12bb:b18b:393d:ba53]:8000/v1/chat/completions,http://[2605:340:cd51:7700:d46b:9a9a:a4df:c127]:8000/v1/chat/completions" \
+   --judge-vllm-server-urls "http://[2605:340:cd51:7700:d1a8:e5a:c6f2:f04b]:8000/v1/chat/completions,http://[2605:340:cd51:7700:3b3:f4f8:7745:27ca]:8000/v1/chat/completions,http://[2605:340:cd51:7700:4dbb:8442:2205:10a]:8000/v1/chat/completions,http://[2605:340:cd51:7700:3a1e:8a48:6bd2:296a]:8000/v1/chat/completions,http://[2605:340:cd51:7700:50fb:5128:d2e6:5f69]:8000/v1/chat/completions,http://[2605:340:cd51:7700:98f4:41cd:eb1e:e980]:8000/v1/chat/completions,http://[2605:340:cd51:7700:9490:9c8b:1fe4:c75a]:8000/v1/chat/completions,http://[2605:340:cd51:7700:48b8:d963:9843:9b6b]:8000/v1/chat/completions,http://[2605:340:cd51:7700:a4ea:daa0:bf3:a09a]:8000/v1/chat/completions,http://[2605:340:cd51:7700:c4cf:571d:3e0c:471b]:8000/v1/chat/completions,http://[2605:340:cd51:7700:765a:b754:5b1:fa80]:8000/v1/chat/completions,http://[2605:340:cd51:7700:17a4:e75:c897:cea4]:8000/v1/chat/completions" \
    --judge-vllm-model gpt-oss-120b \
    --judge-vllm-temperature 0.2 \
    --judge-max-rounds 1 \
    --parquet-scan-batch-size 128 \
    --repo-workers 128 \
-   --max-workers 20 \
+   --max-workers 32 \
+   --section-workers 128 \
    --repo-cache-cleanup on-success \
+   --disable-hydration \
    --hdfs-output-dir "hdfs://harunawl/home/byte_data_seed_wl/user/xingtianshun/deepwiki_data"
 ```
 --repo-workers 4：控制每个批次中最多同时处理几个仓库（也就是跨仓库的线程池规模）
 --repo-batch-size 64：把总体仓库列表切成每批最多 64 个，逐批顺序执行，避免一次性启动太多仓库
 --max-workers 4：只影响单个仓库内部的页面级并发度（DeepWikiPipeline的线程池）
+--section-workers 8：在单个页面内部把 section 并行化（可选；默认每页串行），适合“页少但 section 很多”的仓库
+--disable-hydration：关闭源码引用回填（faster，且避免大规模并发时被磁盘/网络盘 I/O 卡住）
+--hydration-timeout 0.5：每个 section 的回填最多耗时 0.5s，超时则跳过回填继续跑
+--hydration-workers 4：每个 repo 内回填任务的最大并发（配合 section-workers 防止 I/O 放大）
 
 # 提取数据
 

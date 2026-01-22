@@ -18,7 +18,9 @@ def normalize_heading(text: Optional[str]) -> str:
     if text is None:
         return "__intro__"
     stripped = text.strip()
-    stripped = re.sub(r"^\d+(?:\.\d+)*\s+", "", stripped)
+    # Remove leading outline numbering tokens.
+    # Supports forms like "4.2 Title", "4_2 Title", "4-2 Title", "4:2 Title".
+    stripped = re.sub(r"^\d+(?:[._:\-]\d+)*\s+", "", stripped)
     lowered = stripped.lower()
     normalized = re.sub(r"[^a-z0-9]+", "", lowered)
     return normalized or "__intro__"

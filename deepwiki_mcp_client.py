@@ -985,11 +985,15 @@ def _execute_pipeline_for_target(
             repo_commit=None if args.parquet_input_dir else target.commit,
             allow_git_clone=not bool(args.parquet_input_dir),
             show_page_progress=False,
+            enable_hydration=not bool(args.disable_hydration),
+            hydration_timeout=args.hydration_timeout,
+            hydration_workers=args.hydration_workers,
             judge_rounds=args.judge_max_rounds,
             repo_root=repo_root,
             max_pages=args.max_pages,
             max_sections_per_page=args.max_sections_per_page,
             max_workers=args.max_workers,
+            section_workers=args.section_workers,
             skip_pages=args.skip_page,
         )
         output = pipeline.run(
@@ -1426,12 +1430,44 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="Debug option: cap concurrent page processing threads.",
     )
     parser.add_argument(
+        "--section-workers",
+        type=int,
+        default=None,
+        help=(
+            "Optional: enable intra-page parallelism by processing sections concurrently. "
+            "Defaults to sequential per page."
+        ),
+    )
+    parser.add_argument(
         "--skip-page",
         action="append",
         default=None,
         help=(
             "Skip wiki pages whose headings match this value (case-insensitive). "
             "Use multiple times to skip several pages."
+        ),
+    )
+    parser.add_argument(
+        "--disable-hydration",
+        action="store_true",
+        help="Disable repo snippet hydration (faster; avoids heavy local I/O on large runs).",
+    )
+    parser.add_argument(
+        "--hydration-timeout",
+        type=float,
+        default=None,
+        help=(
+            "Time budget in seconds for repo snippet hydration per section. "
+            "On timeout (or if hydration pool is saturated), hydration is skipped for that section."
+        ),
+    )
+    parser.add_argument(
+        "--hydration-workers",
+        type=int,
+        default=None,
+        help=(
+            "Max concurrent hydration tasks per repo when --hydration-timeout is set "
+            "(default: 4). Limits I/O amplification under high --section-workers."
         ),
     )
     parser.add_argument(
@@ -1584,10 +1620,16 @@ def validate_args(args: argparse.Namespace, targets: Sequence[RepoTarget]) -> No
         raise MCPError("--max-sections-per-page must be >= 1 when provided.")
     if args.max_workers is not None and args.max_workers < 1:
         raise MCPError("--max-workers must be >= 1 when provided.")
+    if args.section_workers is not None and args.section_workers < 1:
+        raise MCPError("--section-workers must be >= 1 when provided.")
     if args.repo_workers is not None and args.repo_workers < 1:
         raise MCPError("--repo-workers must be >= 1 when provided.")
     if args.repo_batch_size is not None and args.repo_batch_size < 1:
         raise MCPError("--repo-batch-size must be >= 1 when provided.")
+    if args.hydration_timeout is not None and args.hydration_timeout <= 0:
+        raise MCPError("--hydration-timeout must be > 0 when provided.")
+    if args.hydration_workers is not None and args.hydration_workers < 1:
+        raise MCPError("--hydration-workers must be >= 1 when provided.")
     if len(targets) > 1:
         if args.output and not args.output_dir:
             raise MCPError("Use --output-dir when generating datasets for multiple repositories.")

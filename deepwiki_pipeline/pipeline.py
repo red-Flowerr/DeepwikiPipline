@@ -7,6 +7,8 @@ import shutil
 import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import nullcontext
+import threading
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
 
@@ -53,9 +55,13 @@ class DeepWikiPipeline:
         repo_root: Optional[Path] = None,
         allow_git_clone: bool = True,
         show_page_progress: bool = True,
+        enable_hydration: bool = True,
+        hydration_timeout: Optional[float] = None,
+        hydration_workers: Optional[int] = None,
         max_pages: Optional[int] = None,
         max_sections_per_page: Optional[int] = None,
         max_workers: Optional[int] = None,
+        section_workers: Optional[int] = None,
         skip_pages: Optional[Sequence[str]] = None,
     ) -> None:
         self.session = session
@@ -67,11 +73,23 @@ class DeepWikiPipeline:
         self.repo_root = repo_root.resolve() if repo_root else None
         self.allow_git_clone = allow_git_clone
         self.show_page_progress = show_page_progress
+        self.enable_hydration = bool(enable_hydration)
+        self.hydration_timeout = (
+            float(hydration_timeout)
+            if hydration_timeout is not None and hydration_timeout > 0
+            else None
+        )
+        self.hydration_workers = (
+            hydration_workers if hydration_workers and hydration_workers > 0 else None
+        )
         self.max_pages = max_pages if max_pages and max_pages > 0 else None
         self.max_sections_per_page = (
             max_sections_per_page if max_sections_per_page and max_sections_per_page > 0 else None
         )
         self.max_workers = max_workers if max_workers and max_workers > 0 else None
+        self.section_workers = (
+            section_workers if section_workers and section_workers > 0 else None
+        )
         self._managed_repo_dir: Optional[Path] = None
         self._managed_repo_root: Optional[Path] = None
         self._active_repo_root: Optional[Path] = None
@@ -202,6 +220,7 @@ class DeepWikiPipeline:
 
         seen_pages: set[str] = set()
         page_entries: List[OutlineNode] = []
+        missing_pages: List[str] = []
         for page_node in _flatten(outline_nodes):
             page_key = normalize_heading(page_node.title)
             if page_key in seen_pages:
@@ -210,17 +229,33 @@ class DeepWikiPipeline:
             if page_key in self._skip_pages:
                 logger.info("Skipping page %s due to skip-pages configuration.", page_node.title)
                 continue
+            if page_key not in pages:
+                missing_pages.append(page_node.title)
+                logger.warning(
+                    "Skipping outline page %s because it is missing from wiki content.",
+                    page_node.title,
+                )
+                continue
             if self.max_pages is not None and len(page_entries) >= self.max_pages:
                 break
             page_entries.append(page_node)
 
         if not page_entries:
             raise MCPError("No eligible pages were discovered in the wiki outline.")
+        if missing_pages:
+            logger.info(
+                "Skipped %d outline pages missing from wiki content (first few: %s).",
+                len(missing_pages),
+                ", ".join(missing_pages[:5]),
+            )
 
         page_results: Dict[int, Tuple[Optional[DatasetChunk], List[SubsectionResult]]] = {}
         next_index_to_emit = 0
         indexed_entries: List[Tuple[int, OutlineNode]] = list(enumerate(page_entries))
         max_workers = self.max_workers or min(32, len(indexed_entries))
+        section_workers = self.section_workers or 1
+        hydration_timeout = self.hydration_timeout
+        hydration_workers = self.hydration_workers or 4
 
         completed_pages = 0
         total_pages = len(indexed_entries)
@@ -234,16 +269,38 @@ class DeepWikiPipeline:
             if self.show_page_progress and tqdm and total_pages > 0
             else None
         )
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {
-                executor.submit(
-                    self._process_page,
-                    page_node,
-                    pages,
-                    judge_rounds,
-                ): index
-                for index, page_node in indexed_entries
-            }
+        section_executor_cm = (
+            ThreadPoolExecutor(max_workers=section_workers) if section_workers > 1 else nullcontext()
+        )
+        hydration_executor_cm = (
+            ThreadPoolExecutor(max_workers=hydration_workers)
+            if hydration_timeout and self.enable_hydration and self._active_repo_root
+            else nullcontext()
+        )
+        hydration_semaphore = (
+            threading.Semaphore(hydration_workers)
+            if hydration_timeout and self.enable_hydration and self._active_repo_root
+            else None
+        )
+        with (
+            section_executor_cm as section_executor,
+            hydration_executor_cm as hydration_executor,
+            ThreadPoolExecutor(max_workers=max_workers) as executor,
+        ):
+            futures = {}
+            for index, page_node in indexed_entries:
+                futures[
+                    executor.submit(
+                        self._process_page,
+                        page_node,
+                        pages,
+                        judge_rounds,
+                        section_executor if section_workers > 1 else None,
+                        hydration_executor if hydration_semaphore is not None else None,
+                        hydration_semaphore,
+                    )
+                ] = index
+
             for future in as_completed(futures):
                 index = futures[future]
                 try:
@@ -316,21 +373,30 @@ class DeepWikiPipeline:
         page_node: OutlineNode,
         pages: Dict[str, PageContent],
         judge_rounds: int,
+        section_executor: Optional[ThreadPoolExecutor],
+        hydration_executor: Optional[ThreadPoolExecutor],
+        hydration_semaphore: Optional[threading.Semaphore],
     ) -> Tuple[Optional[DatasetChunk], List[SubsectionResult]]:
         page = resolve_page(pages, page_node.title)
         section_keys: List[str] = list(page.order)
         if self.max_sections_per_page is not None:
             section_keys = section_keys[: self.max_sections_per_page]
-        page_sections: List[SubsectionResult] = []
-        for section_key in section_keys:
-            section_content = page.sections.get(section_key)
-            if not section_content:
+
+        indexed_sections: List[Tuple[int, str]] = []
+        for idx, section_key in enumerate(section_keys):
+            if section_key not in page.sections:
                 logger.debug(
                     "Skipping %s :: section key %s (not found in page content).",
                     page.title,
                     section_key,
                 )
                 continue
+            indexed_sections.append((idx, section_key))
+
+        def process_section(index: int, section_key: str) -> Tuple[int, Optional[SubsectionResult]]:
+            section_content = page.sections.get(section_key)
+            if not section_content:
+                return index, None
             section_heading = section_content.heading or page.title
             logger.debug(
                 "Processing page %s :: section %s",
@@ -340,19 +406,48 @@ class DeepWikiPipeline:
             raw_section_text = section_content.text
             hydrated_context = raw_section_text
             repo_root = self._active_repo_root
-            if repo_root:
-                try:
-                    hydrated_context = hydrate_section_text(
-                        raw_section_text,
-                        repo_root=repo_root,
-                    )
-                except Exception as exc:  # pragma: no cover
-                    logger.warning(
-                        "Hydration failed for %s :: %s: %s",
-                        page.title,
-                        section_heading,
-                        exc,
-                    )
+            if repo_root and self.enable_hydration:
+                if hydration_executor is None or hydration_semaphore is None:
+                    try:
+                        hydrated_context = hydrate_section_text(
+                            raw_section_text,
+                            repo_root=repo_root,
+                        )
+                    except Exception as exc:  # pragma: no cover
+                        logger.warning(
+                            "Hydration failed for %s :: %s: %s",
+                            page.title,
+                            section_heading,
+                            exc,
+                        )
+                else:
+                    if not hydration_semaphore.acquire(blocking=False):
+                        logger.debug(
+                            "Skipping hydration for %s :: %s (hydration pool saturated).",
+                            page.title,
+                            section_heading,
+                        )
+                    else:
+                        def _hydrate_task() -> str:
+                            try:
+                                return hydrate_section_text(raw_section_text, repo_root=repo_root)
+                            finally:
+                                hydration_semaphore.release()
+
+                        try:
+                            hydrate_future = hydration_executor.submit(_hydrate_task)
+                        except Exception:
+                            hydration_semaphore.release()
+                            raise
+                        try:
+                            hydrated_context = hydrate_future.result(timeout=self.hydration_timeout)
+                        except Exception as exc:  # includes TimeoutError
+                            logger.warning(
+                                "Hydration skipped for %s :: %s: %s",
+                                page.title,
+                                section_heading,
+                                exc,
+                            )
             section_result = make_section_result(
                 repo=self.repo,
                 page_title=page.title,
@@ -382,7 +477,36 @@ class DeepWikiPipeline:
                 code_blocks=code_refs,
                 original_context=hydrated_context.strip(),
             )
-            page_sections.append(subsection)
+            return index, subsection
+
+        page_sections: List[SubsectionResult] = []
+        if section_executor is None or len(indexed_sections) <= 1:
+            for idx, section_key in indexed_sections:
+                _, subsection = process_section(idx, section_key)
+                if subsection:
+                    page_sections.append(subsection)
+        else:
+            futures = {}
+            for idx, section_key in indexed_sections:
+                future = section_executor.submit(process_section, idx, section_key)
+                futures[future] = section_key
+            indexed_results: List[Tuple[int, SubsectionResult]] = []
+            for future in as_completed(futures):
+                section_key = futures[future]
+                try:
+                    idx, subsection = future.result()
+                except Exception as exc:
+                    logger.exception(
+                        "Section processing failed for %s :: %s: %s",
+                        page.title,
+                        section_key,
+                        exc,
+                    )
+                    raise
+                if subsection:
+                    indexed_results.append((idx, subsection))
+            indexed_results.sort(key=lambda item: item[0])
+            page_sections = [subsection for _, subsection in indexed_results]
         if not page_sections:
             return None, page_sections
         chunk = DatasetChunk(
