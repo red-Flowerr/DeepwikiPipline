@@ -7,7 +7,7 @@ import logging
 import time
 import threading
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union, cast
+from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union, cast
 from urllib.parse import urlsplit, urlunsplit
 
 import requests
@@ -30,6 +30,110 @@ class VLLMError(RuntimeError):
 
 _ROUTER_CACHE: Dict[Tuple[str, ...], object] = {}
 _ROUTER_LOCK = threading.Lock()
+_ENDPOINT_COOLDOWN_UNTIL: Dict[str, float] = {}
+_ENDPOINT_COOLDOWN_LOCK = threading.Lock()
+_ENDPOINT_HEALTH_UNTIL: Dict[str, float] = {}
+_ENDPOINT_HEALTH_LOCK = threading.Lock()
+
+
+def _cooldown_endpoint(endpoint: str, *, seconds: float) -> None:
+    if seconds <= 0:
+        return
+    until = time.time() + seconds
+    with _ENDPOINT_COOLDOWN_LOCK:
+        previous = _ENDPOINT_COOLDOWN_UNTIL.get(endpoint)
+        if previous is None or until > previous:
+            _ENDPOINT_COOLDOWN_UNTIL[endpoint] = until
+
+
+def _is_endpoint_cooled_down(endpoint: str) -> bool:
+    now = time.time()
+    with _ENDPOINT_COOLDOWN_LOCK:
+        until = _ENDPOINT_COOLDOWN_UNTIL.get(endpoint)
+    return bool(until and until > now)
+
+
+def _healthcheck_endpoint(
+    endpoint: str,
+    *,
+    timeout: float,
+    api_key: Optional[str],
+    destination_service: Optional[str],
+) -> Tuple[bool, str]:
+    """
+    Best-effort endpoint health check.
+
+    Tries `/models` first; if unavailable, tries a tiny `/chat/completions` call.
+    Returns (ok, detail).
+    """
+    now = time.time()
+    with _ENDPOINT_HEALTH_LOCK:
+        healthy_until = _ENDPOINT_HEALTH_UNTIL.get(endpoint)
+    if healthy_until and healthy_until > now:
+        return True, "cached ok"
+    base = endpoint.rstrip("/")
+    models_url = base
+    if models_url.endswith("/chat/completions"):
+        models_url = models_url[: -len("/chat/completions")]
+    if models_url.endswith("/v1"):
+        models_url = models_url[:-3]
+    models_url = models_url.rstrip("/") + "/v1/models"
+
+    headers: Dict[str, str] = {}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    headers["Destination-Service"] = destination_service or "openai"
+
+    try:
+        resp = requests.get(models_url, headers=headers, timeout=timeout)
+        if 200 <= resp.status_code < 300:
+            with _ENDPOINT_HEALTH_LOCK:
+                _ENDPOINT_HEALTH_UNTIL[endpoint] = time.time() + 300.0
+            return True, f"GET {models_url} -> {resp.status_code}"
+        detail = _summarize_text(resp.text)
+        return False, f"GET {models_url} -> {resp.status_code}: {detail}"
+    except requests.RequestException as exc:
+        payload: Dict[str, object] = {
+            "model": "gpt-oss-120b",
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 1,
+            "temperature": 0,
+        }
+        try:
+            resp = requests.post(base, json=payload, headers=headers, timeout=timeout)
+            if 200 <= resp.status_code < 300:
+                with _ENDPOINT_HEALTH_LOCK:
+                    _ENDPOINT_HEALTH_UNTIL[endpoint] = time.time() + 300.0
+                return True, f"POST {base} -> {resp.status_code}"
+            detail = _summarize_text(resp.text)
+            return False, f"POST {base} -> {resp.status_code}: {detail}"
+        except requests.RequestException as exc2:
+            return False, f"healthcheck failed: {exc} / {exc2}"
+
+
+def _diagnose_endpoints_on_failure(
+    endpoints: Sequence[str],
+    *,
+    timeout: float,
+    api_key: Optional[str],
+    destination_service: Optional[str],
+) -> List[Tuple[str, str]]:
+    """
+    Returns list of (endpoint, detail) for endpoints that currently look unhealthy.
+
+    This is intended to run only after a Router failure, to surface which URLs are bad.
+    """
+    failures: List[Tuple[str, str]] = []
+    for endpoint in endpoints:
+        ok, detail = _healthcheck_endpoint(
+            endpoint,
+            timeout=timeout,
+            api_key=api_key,
+            destination_service=destination_service,
+        )
+        if not ok:
+            failures.append((endpoint, detail))
+    return failures
 
 
 def normalize_host(host: str) -> str:
@@ -236,13 +340,39 @@ def _call_litellm_router(
     api_key: Optional[str],
     destination_service: Optional[str],
     timeout: float,
+    retries: int = 2,
+    retry_backoff: float = 2.0,
+    healthcheck: bool = True,
 ) -> str:
     cache_key = (tuple(endpoints), model, api_key or "", destination_service or "")
+
+    candidates = [ep for ep in endpoints if not _is_endpoint_cooled_down(ep)]
+    if not candidates:
+        candidates = list(endpoints)
+
+    if healthcheck:
+        healthy: List[str] = []
+        for ep in candidates:
+            ok, detail = _healthcheck_endpoint(
+                ep,
+                timeout=min(10.0, max(1.0, timeout)),
+                api_key=api_key,
+                destination_service=destination_service,
+            )
+            if ok:
+                healthy.append(ep)
+            else:
+                logger.warning("LiteLLM endpoint unhealthy: %s (%s)", ep, detail)
+                _cooldown_endpoint(ep, seconds=60.0)
+        if healthy:
+            candidates = healthy
+
     attempt = 0
-    while True:
+    last_error: Optional[Exception] = None
+    while attempt < max(1, retries):
         attempt += 1
         router = _get_litellm_router(
-            endpoints=endpoints,
+            endpoints=candidates,
             model=model,
             api_key=api_key,
             destination_service=destination_service,
@@ -262,20 +392,50 @@ def _call_litellm_router(
             logger.debug(
                 "Dispatching LiteLLM chat completion for model %s across %d endpoints (attempt %d).",
                 model,
-                len(endpoints),
+                len(candidates),
                 attempt,
             )
             response = router.completion(**kwargs)
         except Exception as exc:  # pragma: no cover - passthrough error handling
+            last_error = exc
             lowered = str(exc).lower()
-            transient = "connection is closed by peer" in lowered or "connection is closed" in lowered
-            if transient and attempt < 2:
+            transient = (
+                "connection error" in lowered
+                or "connection is closed by peer" in lowered
+                or "connection is closed" in lowered
+                or "timeout" in lowered
+            )
+            logger.warning(
+                "LiteLLM router call failed (attempt %d/%d, endpoints=%d): %s",
+                attempt,
+                max(1, retries),
+                len(candidates),
+                exc,
+            )
+            if transient and candidates:
+                failures = _diagnose_endpoints_on_failure(
+                    candidates,
+                    timeout=min(10.0, max(1.0, timeout)),
+                    api_key=api_key,
+                    destination_service=destination_service,
+                )
+                for endpoint, detail in failures:
+                    logger.warning("LiteLLM endpoint failing (post-error check): %s (%s)", endpoint, detail)
+                    _cooldown_endpoint(endpoint, seconds=120.0)
+                if failures and len(failures) < len(candidates):
+                    candidates = [ep for ep in candidates if ep not in {f[0] for f in failures}]
+            if transient:
                 with _ROUTER_LOCK:
                     _ROUTER_CACHE.pop(cache_key, None)
-                logger.debug("Refreshing LiteLLM router cache after transient connection reset.")
+                time.sleep(retry_backoff * attempt)
                 continue
-            raise VLLMError(f"LiteLLM router call failed: {exc}") from exc
-        break
+            break
+    else:
+        last_error = last_error or Exception("unknown error")
+
+    if last_error is not None and attempt >= max(1, retries):
+        raise VLLMError(f"LiteLLM router call failed: {last_error}") from last_error
+
     payload: Dict[str, object]
     if hasattr(response, "model_dump"):
         payload = response.model_dump()
@@ -425,6 +585,8 @@ def call_vllm_chat(
             api_key=api_key,
             destination_service=destination_service,
             timeout=timeout,
+            retries=retries,
+            retry_backoff=retry_backoff,
         )
 
     session = requests.Session()

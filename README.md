@@ -78,7 +78,7 @@ python deepwiki_mcp_client.py \
 
 
 
-
+http://[2605:340:cd51:7700:d2a0:3ebe:6ad2:ccb2]:8000/v1/chat/completions,http://[2605:340:cd51:7700:78c7:e555:ac89:5633]:8000/v1/chat/completions,http://[2605:340:cd51:7700:a3ee:7aef:e6a9:10de]:8000/v1/chat/completions,http://[2605:340:cd51:7700:1134:7cdb:9a9e:b6e0]:8000/v1/chat/completions,http://[2605:340:cd51:7700:192e:909d:3448:7e0a]:8000/v1/chat/completions,http://[2605:340:cd51:7700:a442:17d0:4bf:5108]:8000/v1/chat/completions,http://[2605:340:cd51:7700:6873:76a7:1507:fba]:8000/v1/chat/completions,http://[2605:340:cd51:7700:6873:76a7:1507:fba]:8000/v1/chat/completions,http://[2605:340:cd51:7700:ea6f:755d:6615:4dc2]:8000/v1/chat/completions,http://[2605:340:cd51:7700:b205:844b:c560:cc3e]:8000/v1/chat/completions,http://[2605:340:cd51:7700:ac40:6b9:4bac:e956]:8000/v1/chat/completions,http://[2605:340:cd51:7700:a442:17d0:4bf:5108]:8000/v1/chat/completions
 
 
 
@@ -92,22 +92,26 @@ python deepwiki_mcp_client.py \
    --parquet-input-dir /mnt/hdfs/userx/shanyong/code/code_wiki/deepwiki \
    --repo-cache-dir /tmp/deepwiki_repo_cache \
    --design-use-vllm \
-   --design-vllm-server-urls "http://[2605:340:cd51:7700:d1a8:e5a:c6f2:f04b]:8000/v1/chat/completions,http://[2605:340:cd51:7700:3b3:f4f8:7745:27ca]:8000/v1/chat/completions,http://[2605:340:cd51:7700:4dbb:8442:2205:10a]:8000/v1/chat/completions,http://[2605:340:cd51:7700:3a1e:8a48:6bd2:296a]:8000/v1/chat/completions,http://[2605:340:cd51:7700:50fb:5128:d2e6:5f69]:8000/v1/chat/completions,http://[2605:340:cd51:7700:98f4:41cd:eb1e:e980]:8000/v1/chat/completions,http://[2605:340:cd51:7700:9490:9c8b:1fe4:c75a]:8000/v1/chat/completions,http://[2605:340:cd51:7700:48b8:d963:9843:9b6b]:8000/v1/chat/completions,http://[2605:340:cd51:7700:a4ea:daa0:bf3:a09a]:8000/v1/chat/completions,http://[2605:340:cd51:7700:c4cf:571d:3e0c:471b]:8000/v1/chat/completions,http://[2605:340:cd51:7700:765a:b754:5b1:fa80]:8000/v1/chat/completions,http://[2605:340:cd51:7700:17a4:e75:c897:cea4]:8000/v1/chat/completions" \
+   --design-vllm-server-urls "http://[2605:340:cd51:7700:d2a0:3ebe:6ad2:ccb2]:8000/v1/chat/completions,http://[2605:340:cd51:7700:78c7:e555:ac89:5633]:8000/v1/chat/completions,http://[2605:340:cd51:7700:a3ee:7aef:e6a9:10de]:8000/v1/chat/completions,http://[2605:340:cd51:7700:1134:7cdb:9a9e:b6e0]:8000/v1/chat/completions,http://[2605:340:cd51:7700:192e:909d:3448:7e0a]:8000/v1/chat/completions,http://[2605:340:cd51:7700:a442:17d0:4bf:5108]:8000/v1/chat/completions,http://[2605:340:cd51:7700:6873:76a7:1507:fba]:8000/v1/chat/completions,http://[2605:340:cd51:7700:6873:76a7:1507:fba]:8000/v1/chat/completions,http://[2605:340:cd51:7700:ea6f:755d:6615:4dc2]:8000/v1/chat/completions,http://[2605:340:cd51:7700:b205:844b:c560:cc3e]:8000/v1/chat/completions,http://[2605:340:cd51:7700:ac40:6b9:4bac:e956]:8000/v1/chat/completions,http://[2605:340:cd51:7700:a442:17d0:4bf:5108]:8000/v1/chat/completions" \
    --design-vllm-model gpt-oss-120b \
    --design-vllm-temperature 0.7 \
    --judge-use-llm \
-   --judge-vllm-server-urls "http://[2605:340:cd51:7700:d1a8:e5a:c6f2:f04b]:8000/v1/chat/completions,http://[2605:340:cd51:7700:3b3:f4f8:7745:27ca]:8000/v1/chat/completions,http://[2605:340:cd51:7700:4dbb:8442:2205:10a]:8000/v1/chat/completions,http://[2605:340:cd51:7700:3a1e:8a48:6bd2:296a]:8000/v1/chat/completions,http://[2605:340:cd51:7700:50fb:5128:d2e6:5f69]:8000/v1/chat/completions,http://[2605:340:cd51:7700:98f4:41cd:eb1e:e980]:8000/v1/chat/completions,http://[2605:340:cd51:7700:9490:9c8b:1fe4:c75a]:8000/v1/chat/completions,http://[2605:340:cd51:7700:48b8:d963:9843:9b6b]:8000/v1/chat/completions,http://[2605:340:cd51:7700:a4ea:daa0:bf3:a09a]:8000/v1/chat/completions,http://[2605:340:cd51:7700:c4cf:571d:3e0c:471b]:8000/v1/chat/completions,http://[2605:340:cd51:7700:765a:b754:5b1:fa80]:8000/v1/chat/completions,http://[2605:340:cd51:7700:17a4:e75:c897:cea4]:8000/v1/chat/completions" \
+   --judge-vllm-server-urls "http://[2605:340:cd51:7700:d2a0:3ebe:6ad2:ccb2]:8000/v1/chat/completions,http://[2605:340:cd51:7700:78c7:e555:ac89:5633]:8000/v1/chat/completions,http://[2605:340:cd51:7700:a3ee:7aef:e6a9:10de]:8000/v1/chat/completions,http://[2605:340:cd51:7700:1134:7cdb:9a9e:b6e0]:8000/v1/chat/completions,http://[2605:340:cd51:7700:192e:909d:3448:7e0a]:8000/v1/chat/completions,http://[2605:340:cd51:7700:a442:17d0:4bf:5108]:8000/v1/chat/completions,http://[2605:340:cd51:7700:6873:76a7:1507:fba]:8000/v1/chat/completions,http://[2605:340:cd51:7700:6873:76a7:1507:fba]:8000/v1/chat/completions,http://[2605:340:cd51:7700:ea6f:755d:6615:4dc2]:8000/v1/chat/completions,http://[2605:340:cd51:7700:b205:844b:c560:cc3e]:8000/v1/chat/completions,http://[2605:340:cd51:7700:ac40:6b9:4bac:e956]:8000/v1/chat/completions,http://[2605:340:cd51:7700:a442:17d0:4bf:5108]:8000/v1/chat/completions" \
    --judge-vllm-model gpt-oss-120b \
    --judge-vllm-temperature 0.2 \
    --judge-max-rounds 1 \
-   --parquet-scan-batch-size 128 \
-   --repo-workers 128 \
-   --max-workers 32 \
-   --section-workers 128 \
+   --parquet-scan-batch-size 64 \
+   --repo-workers 16 \
+   --max-workers 16 \
+   --section-workers 16 \
    --repo-cache-cleanup on-success \
    --disable-hydration \
-   --hdfs-output-dir "hdfs://harunawl/home/byte_data_seed_wl/user/xingtianshun/deepwiki_data"
+   --hdfs-output-dir "hdfs://harunawl/home/byte_data_seed_wl/user/xingtianshun/deepwiki_data" \
+   --log-level DEBUG
 ```
+说明：当同时设置 `--skip-existing` 和 `--hdfs-output-dir` 时，会优先检查 HDFS 上是否已存在该 repo 对应的输出子目录；若目录已存在则直接跳过该 repo 的生成与上传（实现上会先对 `--hdfs-output-dir` 做一次非递归索引，避免每个 repo 都频繁调用 HDFS 命令）。
+
+说明：当使用 LiteLLM server pooling（`--*-vllm-server-urls`）时，启动阶段会先对每个 endpoint 做轻量健康检查（优先 `/v1/models`，必要时回退到一次极小的 chat 请求），并对不健康节点做短暂冷却剔除；同时 `--*-vllm-retries/--*-vllm-retry-backoff/--*-vllm-timeout` 也会应用到 Router 调用路径，减少起步阶段的连接错误/超时。
 --repo-workers 4：控制每个批次中最多同时处理几个仓库（也就是跨仓库的线程池规模）
 --repo-batch-size 64：把总体仓库列表切成每批最多 64 个，逐批顺序执行，避免一次性启动太多仓库
 --max-workers 4：只影响单个仓库内部的页面级并发度（DeepWikiPipeline的线程池）

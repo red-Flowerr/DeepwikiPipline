@@ -14,7 +14,7 @@ import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 try:  # Optional progress indicator
     from tqdm import tqdm
@@ -240,8 +240,103 @@ def _hdfs_mkdir_p(hdfs_dir: str, *, hdfs_bin: str) -> None:
     _run_hdfs([hdfs_bin, "dfs", "-mkdir", "-p", hdfs_dir])
 
 
+def _hdfs_test(command: List[str]) -> bool:
+    result = subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def _hdfs_exists(hdfs_path: str, *, hdfs_bin: str) -> bool:
+    return _hdfs_test([hdfs_bin, "dfs", "-test", "-e", hdfs_path])
+
+
+def _hdfs_is_dir(hdfs_path: str, *, hdfs_bin: str) -> bool:
+    return _hdfs_test([hdfs_bin, "dfs", "-test", "-d", hdfs_path])
+
+
 def _hdfs_put(local_path: Path, hdfs_dest: str, *, hdfs_bin: str) -> None:
     _run_hdfs([hdfs_bin, "dfs", "-put", "-f", str(local_path), hdfs_dest])
+
+
+def _hdfs_expected_outputs_exist(
+    *,
+    target: "RepoTarget",
+    output_format: str,
+    narrative_modes: Sequence[str],
+    narrative_format: str,
+    hdfs_output_dir: str,
+    hdfs_bin: str,
+    existing_paths: Optional[Set[str]] = None,
+) -> bool:
+    """
+    Returns True when the repository output directory already exists on HDFS.
+
+    This is intentionally shallow: it checks only the repo subdirectory existence
+    (not specific files inside). This matches the common "skip by folder" behavior
+    and avoids false negatives when output file sets differ across runs.
+    """
+    repo_dir = _hdfs_join(hdfs_output_dir, _repo_slug(target))
+    if existing_paths is not None:
+        prefix = repo_dir.rstrip("/") + "/"
+        return any(path == repo_dir or path.startswith(prefix) for path in existing_paths)
+    return _hdfs_is_dir(repo_dir, hdfs_bin=hdfs_bin)
+
+
+def _hdfs_list_recursive(hdfs_dir: str, *, hdfs_bin: str) -> Iterable[str]:
+    """
+    Yield all HDFS file paths under `hdfs_dir` (recursive).
+    """
+    completed = subprocess.run(
+        [hdfs_bin, "dfs", "-ls", "-R", hdfs_dir],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if completed.returncode != 0:
+        detail = (completed.stderr or "").strip() or (completed.stdout or "").strip()
+        raise MCPError(f"HDFS command failed: {hdfs_bin} dfs -ls -R {hdfs_dir}\n{detail}")
+    for line in (completed.stdout or "").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("Found "):
+            continue
+        parts = stripped.split()
+        if not parts:
+            continue
+        yield parts[-1].strip()
+
+
+def _hdfs_list_shallow(hdfs_dir: str, *, hdfs_bin: str) -> Iterable[str]:
+    """
+    Yield direct children paths under `hdfs_dir` (non-recursive).
+    """
+    completed = subprocess.run(
+        [hdfs_bin, "dfs", "-ls", hdfs_dir],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if completed.returncode != 0:
+        detail = (completed.stderr or "").strip() or (completed.stdout or "").strip()
+        raise MCPError(f"HDFS command failed: {hdfs_bin} dfs -ls {hdfs_dir}\n{detail}")
+    for line in (completed.stdout or "").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("Found "):
+            continue
+        parts = stripped.split()
+        if not parts:
+            continue
+        yield parts[-1].strip()
 
 
 def _maybe_upload_repo_outputs_to_hdfs(
@@ -530,6 +625,11 @@ def _run_parquet_stream(
     prefix = args.parquet_repo_prefix.strip() if args.parquet_repo_prefix else None
     scan_batch_size = args.parquet_scan_batch_size or 64
     should_skip_existing = bool(args.skip_existing)
+    existing_hdfs_paths: Optional[Set[str]] = None
+    if should_skip_existing and args.hdfs_output_dir:
+        logger.info("Indexing existing HDFS output directories under %s (for --skip-existing).", args.hdfs_output_dir)
+        existing_hdfs_paths = set(_hdfs_list_shallow(args.hdfs_output_dir, hdfs_bin=args.hdfs_bin))
+        logger.info("Indexed %d existing HDFS paths.", len(existing_hdfs_paths))
 
     cpu_default = os.cpu_count() or 4
     repo_workers = args.repo_workers or max(1, cpu_default)
@@ -541,6 +641,24 @@ def _run_parquet_stream(
 
     processed = 0
     errors: List[Tuple[str, Exception]] = []
+    skipped_by_hdfs = 0
+    skipped_by_local = 0
+    generated = 0
+
+    def log_skip_stats(*, force: bool = False) -> None:
+        if args.progress_only:
+            return
+        interval = 2000
+        if not force and processed and processed % interval != 0:
+            return
+        logger.info(
+            "Skip stats: processed=%d generated=%d skipped_hdfs=%d skipped_local=%d errors=%d",
+            processed,
+            generated,
+            skipped_by_hdfs,
+            skipped_by_local,
+            len(errors),
+        )
 
     def should_process_repo(repo_name: str) -> bool:
         if not repo_name:
@@ -550,6 +668,7 @@ def _run_parquet_stream(
         return True
 
     def worker(repo_name: str, content: str, hdfs_path: str) -> None:
+        nonlocal skipped_by_hdfs, skipped_by_local, generated
         target = RepoTarget(repo=repo_name)
         dataset_path = dataset_dir / _dataset_filename(target, as_json=args.output_format == "json")
         narrative_path = None
@@ -557,9 +676,28 @@ def _run_parquet_stream(
             narrative_path = narrative_dir / _narrative_filename(target, fmt=args.narrative_format)
 
         if should_skip_existing:
+            if args.hdfs_output_dir and _hdfs_expected_outputs_exist(
+                target=target,
+                output_format=args.output_format,
+                narrative_modes=narrative_modes,
+                narrative_format=args.narrative_format,
+                hdfs_output_dir=args.hdfs_output_dir,
+                hdfs_bin=args.hdfs_bin,
+                existing_paths=existing_hdfs_paths,
+            ):
+                skipped_by_hdfs += 1
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug("Skip repo=%s (HDFS directory exists).", repo_name)
+                return
             if dataset_path.exists() and (narrative_path is None or narrative_path.exists()):
+                skipped_by_local += 1
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug("Skip repo=%s (local outputs exist).", repo_name)
                 return
 
+        generated += 1
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("Generate repo=%s.", repo_name)
         _execute_pipeline_for_target(
             session=None,
             target=target,
@@ -605,6 +743,7 @@ def _run_parquet_stream(
                         logger.error("Repository %s failed: %s", finished_repo, exc)
                         errors.append((finished_repo, exc))
                     processed += 1
+                    log_skip_stats()
                     if progress is not None:
                         progress.update(1)
                     break
@@ -623,11 +762,13 @@ def _run_parquet_stream(
                 logger.error("Repository %s failed: %s", finished_repo, exc)
                 errors.append((finished_repo, exc))
             processed += 1
+            log_skip_stats()
             if progress is not None:
                 progress.update(1)
 
     if progress is not None:
         progress.close()
+    log_skip_stats(force=True)
 
     if merged_narrative_path and narrative_dir and narrative_modes and not errors:
         _merge_narrative_outputs(
@@ -1657,6 +1798,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     _configure_logging(args.log_level, suppress_warnings=args.suppress_warning_logs)
     if args.progress_only:
         _disable_all_logging()
+    if args.hdfs_output_dir is not None:
+        args.hdfs_output_dir = args.hdfs_output_dir.strip()
     repo_targets = _resolve_repo_targets(args)
     is_parquet_discovery_mode = bool(
         args.parquet_input_dir
@@ -1668,6 +1811,15 @@ def main(argv: Optional[List[str]] = None) -> None:
     except MCPError as exc:
         logger.error("%s", exc)
         sys.exit(2)
+
+    if args.hdfs_output_dir:
+        if _hdfs_is_dir(args.hdfs_output_dir, hdfs_bin=args.hdfs_bin):
+            logger.info("HDFS output base directory: %s", args.hdfs_output_dir)
+        elif _hdfs_exists(args.hdfs_output_dir, hdfs_bin=args.hdfs_bin):
+            raise MCPError(f"--hdfs-output-dir exists but is not a directory: {args.hdfs_output_dir}")
+        else:
+            _hdfs_mkdir_p(args.hdfs_output_dir, hdfs_bin=args.hdfs_bin)
+            logger.info("Created HDFS output base directory: %s", args.hdfs_output_dir)
 
     session: Optional[Session] = None
     try:
