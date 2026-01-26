@@ -10,6 +10,8 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
+import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -282,8 +284,9 @@ def _hdfs_expected_outputs_exist(
     """
     repo_dir = _hdfs_join(hdfs_output_dir, _repo_slug(target))
     if existing_paths is not None:
-        prefix = repo_dir.rstrip("/") + "/"
-        return any(path == repo_dir or path.startswith(prefix) for path in existing_paths)
+        # existing_paths is a shallow listing of direct children under hdfs_output_dir, so
+        # membership should be exact and O(1).
+        return repo_dir in existing_paths
     return _hdfs_is_dir(repo_dir, hdfs_bin=hdfs_bin)
 
 
@@ -630,6 +633,15 @@ def _run_parquet_stream(
         logger.info("Indexing existing HDFS output directories under %s (for --skip-existing).", args.hdfs_output_dir)
         existing_hdfs_paths = set(_hdfs_list_shallow(args.hdfs_output_dir, hdfs_bin=args.hdfs_bin))
         logger.info("Indexed %d existing HDFS paths.", len(existing_hdfs_paths))
+        try:
+            index_dump_path = dataset_dir / "hdfs_skip_existing_index.txt"
+            index_dump_path.write_text(
+                "\n".join(sorted(existing_hdfs_paths)) + "\n",
+                encoding="utf-8",
+            )
+            logger.info("Wrote HDFS skip-existing index to %s", index_dump_path)
+        except Exception as exc:  # pragma: no cover
+            logger.warning("Failed to write HDFS skip-existing index: %s", exc)
 
     cpu_default = os.cpu_count() or 4
     repo_workers = args.repo_workers or max(1, cpu_default)
@@ -644,6 +656,7 @@ def _run_parquet_stream(
     skipped_by_hdfs = 0
     skipped_by_local = 0
     generated = 0
+    counter_lock = threading.Lock()
 
     def log_skip_stats(*, force: bool = False) -> None:
         if args.progress_only:
@@ -685,17 +698,22 @@ def _run_parquet_stream(
                 hdfs_bin=args.hdfs_bin,
                 existing_paths=existing_hdfs_paths,
             ):
-                skipped_by_hdfs += 1
+                with counter_lock:
+                    skipped_by_hdfs += 1
                 if logger.isEnabledFor(logging.DEBUG):
                     logger.debug("Skip repo=%s (HDFS directory exists).", repo_name)
                 return
-            if dataset_path.exists() and (narrative_path is None or narrative_path.exists()):
-                skipped_by_local += 1
-                if logger.isEnabledFor(logging.DEBUG):
-                    logger.debug("Skip repo=%s (local outputs exist).", repo_name)
-                return
+            # Only fall back to local existence checks when HDFS skipping is not configured.
+            if not args.hdfs_output_dir:
+                if dataset_path.exists() and (narrative_path is None or narrative_path.exists()):
+                    with counter_lock:
+                        skipped_by_local += 1
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug("Skip repo=%s (local outputs exist).", repo_name)
+                    return
 
-        generated += 1
+        with counter_lock:
+            generated += 1
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("Generate repo=%s.", repo_name)
         _execute_pipeline_for_target(
@@ -713,6 +731,7 @@ def _run_parquet_stream(
 
     with ThreadPoolExecutor(max_workers=repo_workers) as executor:
         in_flight: Dict[Any, str] = {}
+        in_flight_started_at: Dict[Any, float] = {}
         for row in _iter_parquet_rows_from_parts(
             parquet_dir,
             columns=["repo_name", "content", "hdfs_path", "error_message"],
@@ -735,21 +754,39 @@ def _run_parquet_stream(
                 continue
 
             while len(in_flight) >= repo_workers:
-                for future in as_completed(list(in_flight.keys())):
-                    finished_repo = in_flight.pop(future)
-                    try:
-                        future.result()
-                    except Exception as exc:
-                        logger.error("Repository %s failed: %s", finished_repo, exc)
-                        errors.append((finished_repo, exc))
-                    processed += 1
-                    log_skip_stats()
-                    if progress is not None:
-                        progress.update(1)
-                    break
+                try:
+                    future = next(as_completed(list(in_flight.keys()), timeout=30.0))
+                except TimeoutError:
+                    if not args.progress_only and in_flight_started_at:
+                        now = time.time()
+                        stuck = sorted(
+                            (
+                                (now - in_flight_started_at.get(f, now), in_flight.get(f, "<unknown>"))
+                                for f in in_flight
+                            ),
+                            reverse=True,
+                        )[:5]
+                        logger.warning(
+                            "No repo finished in 30s; oldest in-flight (seconds, repo): %s",
+                            ", ".join(f"{age:.0f}s {name}" for age, name in stuck),
+                        )
+                    continue
+
+                finished_repo = in_flight.pop(future)
+                in_flight_started_at.pop(future, None)
+                try:
+                    future.result()
+                except Exception as exc:
+                    logger.error("Repository %s failed: %s", finished_repo, exc)
+                    errors.append((finished_repo, exc))
+                processed += 1
+                log_skip_stats()
+                if progress is not None:
+                    progress.update(1)
 
             future = executor.submit(worker, repo_name, content, hdfs_path)
             in_flight[future] = repo_name
+            in_flight_started_at[future] = time.time()
 
             if max_repos is not None and processed + len(in_flight) >= max_repos:
                 break
@@ -1070,6 +1107,7 @@ def _execute_pipeline_for_target(
     progress_needed = dataset_path is not None or (narrative_path is not None and narrative_modes)
     cache_cleanup_dir: Optional[Path] = None
     finished_ok = False
+    repo_label = target.repo
 
     def persist_progress(partial_output: PipelineOutput) -> None:
         _persist_outputs(
@@ -1083,11 +1121,13 @@ def _execute_pipeline_for_target(
         )
 
     try:
+        start_time = time.time()
         outline_text = None
         wiki_markdown = None
         repo_root = None
 
         if args.parquet_input_dir:
+            parquet_stage_start = time.time()
             parquet_dir = Path(args.parquet_input_dir).expanduser()
             desired_repo = target.repo
             found_row = parquet_row
@@ -1112,12 +1152,20 @@ def _execute_pipeline_for_target(
             cache_base = Path(args.repo_cache_dir or "/tmp/deepwiki_repo_cache").expanduser()
             repo_extract_dir = cache_base / _repo_slug(target)
             cache_cleanup_dir = repo_extract_dir
+            logger.info("Repo %s: fetching/extracting zip from %s", repo_label, hdfs_zip_path)
             repo_root = _download_and_extract_repo_zip_cached(
                 hdfs_zip_path=hdfs_zip_path,
                 extract_dir=repo_extract_dir,
                 hdfs_bin=args.hdfs_bin,
             )
+            logger.info(
+                "Repo %s: parquet+zip stage done in %.1fs (repo_root=%s)",
+                repo_label,
+                time.time() - parquet_stage_start,
+                repo_root,
+            )
 
+        pipeline_stage_start = time.time()
         pipeline = DeepWikiPipeline(
             session=session,
             repo=target.repo,
@@ -1142,7 +1190,9 @@ def _execute_pipeline_for_target(
             outline_text=outline_text,
             wiki_markdown=wiki_markdown,
         )
+        logger.info("Repo %s: pipeline.run done in %.1fs", repo_label, time.time() - pipeline_stage_start)
 
+        persist_stage_start = time.time()
         _persist_outputs(
             output,
             dataset_path=dataset_path,
@@ -1152,6 +1202,8 @@ def _execute_pipeline_for_target(
             narrative_format=args.narrative_format,
             log_writes=True,
         )
+        logger.info("Repo %s: persist outputs done in %.1fs", repo_label, time.time() - persist_stage_start)
+        upload_stage_start = time.time()
         _maybe_upload_repo_outputs_to_hdfs(
             target=target,
             dataset_path=dataset_path,
@@ -1161,6 +1213,9 @@ def _execute_pipeline_for_target(
             hdfs_output_dir=args.hdfs_output_dir,
             hdfs_bin=args.hdfs_bin,
         )
+        if args.hdfs_output_dir:
+            logger.info("Repo %s: HDFS upload stage done in %.1fs", repo_label, time.time() - upload_stage_start)
+        logger.info("Repo %s: total done in %.1fs", repo_label, time.time() - start_time)
 
         if dataset_path is None and print_to_stdout:
             rendered = _render_dataset_output(output, as_json=args.output_format == "json")
@@ -1501,7 +1556,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--design-vllm-model", type=str, default=None)
     parser.add_argument("--design-vllm-temperature", type=float, default=0.2)
     parser.add_argument("--design-vllm-top-p", type=float, default=None)
-    parser.add_argument("--design-vllm-max-tokens", type=int, default=131072)
+    parser.add_argument("--design-vllm-max-tokens", type=int, default=65536)
     parser.add_argument("--design-vllm-timeout", type=float, default=120.0)
     parser.add_argument("--design-vllm-retries", type=int, default=2)
     parser.add_argument("--design-vllm-retry-backoff", type=float, default=2.0)
@@ -1521,7 +1576,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--judge-vllm-model", type=str, default=None)
     parser.add_argument("--judge-vllm-temperature", type=float, default=0.0)
     parser.add_argument("--judge-vllm-top-p", type=float, default=None)
-    parser.add_argument("--judge-vllm-max-tokens", type=int, default=131072)
+    parser.add_argument("--judge-vllm-max-tokens", type=int, default=65536)
     parser.add_argument("--judge-vllm-timeout", type=float, default=120.0)
     parser.add_argument("--judge-vllm-retries", type=int, default=2)
     parser.add_argument("--judge-vllm-retry-backoff", type=float, default=2.0)

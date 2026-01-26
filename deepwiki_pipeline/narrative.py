@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 import textwrap
+import time
 from dataclasses import dataclass
 from typing import Iterator, List, Optional, Sequence, Tuple, Set
 
@@ -467,6 +468,8 @@ def rewrite_section(
         ChatMessage(role="user", content=user_prompt),
     ]
     try:
+        started_at = time.time()
+        prompt_chars = sum(len(getattr(m, "content", "") or "") for m in messages)
         response = call_vllm_chat(
             host=llm_config.host,
             port=llm_config.port,
@@ -492,6 +495,18 @@ def rewrite_section(
             exc,
         )
         return fallback
+    elapsed = time.time() - started_at
+    if elapsed >= 30.0:
+        logger.warning(
+            "Slow section rewrite (%.1fs) for %s :: %s (section_len=%d prompt_chars=%d model=%s timeout=%.0fs)",
+            elapsed,
+            page_title,
+            section_heading,
+            len(section_text),
+            prompt_chars,
+            llm_config.model,
+            llm_config.timeout,
+        )
     cleaned = _sanitize_visible_text(response or fallback)
     return cleaned or fallback
 
