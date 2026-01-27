@@ -78,6 +78,27 @@ def _is_transient_error(exc: Exception) -> bool:
     )
 
 
+def _is_prompt_too_large_error(exc: Exception) -> bool:
+    if not isinstance(exc, VLLMError):
+        return False
+    message = str(exc).lower()
+    if "http 400" not in message:
+        return False
+    return any(
+        token in message
+        for token in (
+            "context length exceeded",
+            "max_context_length_exceeded",
+            "context_length_exceeded",
+            "token limit exceeded",
+            "too_many_tokens",
+            "max_tokens_exceeded",
+            "probable context length limit",
+            "probable max_tokens limit",
+        )
+    )
+
+
 def _rotate_endpoints_round_robin(endpoints: Sequence[str]) -> List[str]:
     ordered = list(endpoints)
     if len(ordered) <= 1:
@@ -467,6 +488,8 @@ def _call_server_pool_direct(
                 return content
             except Exception as exc:
                 last_exc = exc
+                if _is_prompt_too_large_error(exc):
+                    raise
                 if _is_transient_error(exc):
                     _cooldown_endpoint(endpoint, seconds=120.0)
                 logger.warning(

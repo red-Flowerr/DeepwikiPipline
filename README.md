@@ -101,9 +101,9 @@ python deepwiki_mcp_client.py \
    --judge-vllm-max-tokens 512 \
    --judge-vllm-temperature 0.2 \
    --judge-max-rounds 1 \
-   --parquet-scan-batch-size 256 \
-   --repo-workers 256 \
-   --max-workers 64 \
+   --parquet-scan-batch-size 128 \
+   --repo-workers 128 \
+   --max-workers 32 \
    --section-workers 32 \
    --repo-cache-cleanup on-success \
    --hdfs-output-dir "hdfs://harunawl/home/byte_data_seed_wl/user/xingtianshun/deepwiki_data" \
@@ -113,6 +113,11 @@ python deepwiki_mcp_client.py \
 说明：当同时设置 `--skip-existing` 和 `--hdfs-output-dir` 时，会优先检查 HDFS 上是否已存在该 repo 对应的输出子目录；若目录已存在则直接跳过该 repo 的生成与上传（实现上会先对 `--hdfs-output-dir` 做一次非递归索引，避免每个 repo 都频繁调用 HDFS 命令）。
 
 说明：当使用 server pooling（`--*-vllm-server-urls`）时，会对 endpoints 做去重；请求侧使用 round-robin（每次请求轮换起始 endpoint）来让所有节点参与分摊，并对连接/超时等瞬态失败的节点做短暂冷却剔除，避免持续打到坏节点；`--*-vllm-retries/--*-vllm-retry-backoff/--*-vllm-timeout` 也会应用到 pooling 调用路径。
+
+多 worker 并发：如果你启动多个互相独立的 worker 实例（没有共享队列/状态），可以用 `--shard-count/--shard-index` 对 repo 做确定性分片，避免重复处理同一批数据。例如启动 8 个 worker：
+- worker0: `--shard-count 8 --shard-index 0`
+- worker1: `--shard-count 8 --shard-index 1`
+- ...
 --repo-workers 4：控制每个批次中最多同时处理几个仓库（也就是跨仓库的线程池规模）
 --repo-batch-size 64：把总体仓库列表切成每批最多 64 个，逐批顺序执行，避免一次性启动太多仓库
 --max-workers 4：只影响单个仓库内部的页面级并发度（DeepWikiPipeline的线程池）
