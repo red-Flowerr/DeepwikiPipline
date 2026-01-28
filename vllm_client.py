@@ -17,6 +17,8 @@ try:
 except ImportError:  # pragma: no cover
     Router = None  # type: ignore[assignment]
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class ChatMessage:
@@ -34,6 +36,26 @@ _ENDPOINT_COOLDOWN_UNTIL: Dict[str, float] = {}
 _ENDPOINT_COOLDOWN_LOCK = threading.Lock()
 _POOL_RR_INDEX: Dict[Tuple[str, ...], int] = {}
 _POOL_RR_LOCK = threading.Lock()
+
+def _sanitize_max_tokens(max_tokens: Optional[object]) -> Optional[int]:
+    """
+    Ensure we only send valid OpenAI-compatible max_tokens values.
+
+    Some upstream callers may accidentally propagate invalid values (<= 0 or
+    non-int), which vLLM rejects with HTTP 400 and can stall batch pipelines.
+    """
+    if max_tokens is None:
+        return None
+    try:
+        # Support int-like values (e.g. numpy scalars).
+        coerced = int(max_tokens)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        logger.warning("Ignoring non-integer max_tokens=%r", max_tokens)
+        return None
+    if coerced < 1:
+        logger.warning("Ignoring invalid max_tokens=%d (must be >= 1)", coerced)
+        return None
+    return coerced
 
 
 def _cooldown_endpoint(endpoint: str, *, seconds: float) -> None:
@@ -617,6 +639,7 @@ def call_vllm_chat(
     retry_backoff: float = 2.0,
 ) -> str:
     message_payload = [msg.__dict__ for msg in messages]
+    max_tokens = _sanitize_max_tokens(max_tokens)
     if server_urls:
         endpoints = _normalize_server_pool(
             server_urls,
@@ -670,4 +693,3 @@ def call_vllm_chat(
     if content is None:
         raise VLLMError("vLLM response did not contain message content.")
     return content
-logger = logging.getLogger(__name__)

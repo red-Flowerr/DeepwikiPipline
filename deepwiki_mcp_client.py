@@ -817,7 +817,11 @@ def _run_parquet_stream(
 
     if errors:
         failed = ", ".join(name for name, _ in errors[:10])
-        raise MCPError(f"Failed to process repositories (showing up to 10): {failed}")
+        message = f"Failed to process repositories (showing up to 10): {failed}"
+        if getattr(args, "continue_on_error", False):
+            logger.warning("%s", message)
+            return
+        raise MCPError(message)
 
 
 def _download_and_extract_repo_zip_cached(
@@ -1368,8 +1372,12 @@ def _run_multi_repo_batch(
 
     if errors:
         failed_repos = ", ".join(item.repo for item, _ in errors)
+        message = f"Failed to process repositories: {failed_repos}"
+        if getattr(args, "continue_on_error", False):
+            logger.warning("%s", message)
+            return
         primary = errors[0][1]
-        raise MCPError(f"Failed to process repositories: {failed_repos}") from primary
+        raise MCPError(message) from primary
 
 
 def _merge_narrative_outputs(*, narrative_dir: Path, destination: Path, fmt: str) -> None:
@@ -1410,7 +1418,7 @@ def _parquet_total_rows(parquet_dir: Path) -> int:
 
 
 def _build_design_llm_config(args: argparse.Namespace) -> NarrativeLLMConfig:
-    max_tokens = args.design_vllm_max_tokens or None
+    max_tokens = args.design_vllm_max_tokens if args.design_vllm_max_tokens and args.design_vllm_max_tokens > 0 else None
     top_p = args.design_vllm_top_p or None
     server_pool = _parse_server_url_list(args.design_vllm_server_urls)
     return NarrativeLLMConfig(
@@ -1432,7 +1440,7 @@ def _build_design_llm_config(args: argparse.Namespace) -> NarrativeLLMConfig:
 
 
 def _build_judge_llm_config(args: argparse.Namespace, *, system_prompt: Optional[str]) -> JudgeLLMConfig:
-    max_tokens = args.judge_vllm_max_tokens or None
+    max_tokens = args.judge_vllm_max_tokens if args.judge_vllm_max_tokens and args.judge_vllm_max_tokens > 0 else None
     top_p = args.judge_vllm_top_p or None
     server_pool = _parse_server_url_list(args.judge_vllm_server_urls)
     return JudgeLLMConfig(
@@ -1729,6 +1737,11 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "--skip-existing",
         action="store_true",
         help="Skip repos that already have outputs in --output-dir/--narrative-output-dir.",
+    )
+    parser.add_argument(
+        "--continue-on-error",
+        action="store_true",
+        help="Keep processing remaining repositories even if some fail; logs failures instead of exiting non-zero.",
     )
     parser.add_argument(
         "--repo-cache-dir",
