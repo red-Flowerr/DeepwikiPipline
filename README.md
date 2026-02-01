@@ -41,74 +41,18 @@ pipeline v1 经过多轮迭代，目前具备以下能力：
    - 通过 `--design-vllm-server-urls` / `--judge-vllm-server-urls` 传入逗号分隔或重复参数形式的地址列表，自动使用 LiteLLM Router 做负载均衡。  
    - 需要 `pip install litellm`，未指定列表时会沿用单个 `--*-server-url` 作为兜底节点。  
 
-# Case
-Tencent/ncnn  99ecca
-volcengine/verl 809ae5
 
-# Pipline
-python deepwiki_mcp_client.py \
-  --generate-dataset volcengine/verl \
-  --repo-commit 809ae5 \
-  --output result_data/verl_deepwiki.txt \
-  --output-format text \
-  --narrative-output result_data/verl_narratives.json \
-  --narrative-format json \
-  --narrative-modes code critic \
-  --design-use-vllm \
-  --design-vllm-server-urls http://[2605:340:cd51:7700:d0e8:b2ba:f474:56d6]:8802/v1/chat/completions,http://[2605:340:cd51:7700:c1d:467e:ab2f:7edb]:8802/v1/chat/completions,http://[2605:340:cd51:7700:578f:acc4:bceb:432f]:8802/v1/chat/completions,http://[2605:340:cd51:7700:312e:6895:c534:7eb3]:8802/v1/chat/completions \
-  --design-vllm-model gpt-oss-120b \
-  --design-vllm-temperature 0.7 \
-  --judge-use-llm \
-  --judge-vllm-server-urls http://[2605:340:cd51:7700:d0e8:b2ba:f474:56d6]:8802/v1/chat/completions,http://[2605:340:cd51:7700:c1d:467e:ab2f:7edb]:8802/v1/chat/completions,http://[2605:340:cd51:7700:578f:acc4:bceb:432f]:8802/v1/chat/completions,http://[2605:340:cd51:7700:312e:6895:c534:7eb3]:8802/v1/chat/completions \
-  --judge-vllm-model gpt-oss-120b \
-  --judge-vllm-temperature 0.2 \
-  --judge-max-rounds 1 \
-  --log-level INFO \
-  --max-workers 4
-
-## 批量运行示例
-
-
-"http://[2605:340:cd51:7700:5ae2:c8f3:778:a9d0]:8000/v1/chat/completions,http://[2605:340:cd51:7700:286a:3a59:f4f2:b989]:8000/v1/chat/completions,http://[2605:340:cd51:7700:3930:80b8:8d05:f633]:8000/v1/chat/completions,http://[2605:340:cd51:7700:77b0:be0f:674c:6fe0]:8000/v1/chat/completions,http://[2605:340:cd51:7700:13a8:94f8:597d:e509]:8000/v1/chat/completions,http://[2605:340:cd51:7700:3e72:4aa3:98c9:48e5]:8000/v1/chat/completions,http://[2605:340:cd51:7700:f233:7336:e8dd:6fbf]:8000/v1/chat/completions,http://[2605:340:cd51:7700:97c6:18fe:be8d:f5d]:8000/v1/chat/completions,http://[2605:340:cd51:7700:631d:5d4a:832f:5d27]:8000/v1/chat/completions,http://[2605:340:cd51:7700:98af:4a95:177c:10c4]:8000/v1/chat/completions,http://[2605:340:cd51:7700:256:e584:4eb6:f6ea]:8000/v1/chat/completions,http://[2605:340:cd51:7700:58d7:64bd:e047:d7a]:8000/v1/chat/completions"
 
 ```bash
-
-python deepwiki_mcp_client.py \
-   --parquet-all \
-   --parquet-input-dir /mnt/hdfs/userx/shanyong/code/code_wiki/deepwiki \
-   --parquet-scan-batch-size 128 \
-   --repo-mp-workers 1 \
-   --repo-workers 1 \
-   --max-workers 1 \
-   --section-workers 1 \
-   --repo-cache-dir /tmp/deepwiki_repo_cache \
-   --repo-cache-cleanup on-success \
-   --skip-existing \
-   --narrative-output-dir result_data/batch_narratives \
-   --narrative-format json \
-   --narrative-modes code critic \
-   --design-use-vllm \
-   --design-vllm-server-urls  \
-   --design-vllm-model gpt-oss-120b \
-   --design-vllm-temperature 0.7 \
-   --judge-use-llm \
-   --judge-vllm-server-urls "http://[2605:340:cd51:7700:48a3:70f4:7d3c:a57]:8000/v1/chat/completions,http://[2605:340:cd51:7700:3dbc:b7c3:dd35:8009]:8000/v1/chat/completions,http://[2605:340:cd51:7700:48a3:70f4:7d3c:a57]:8000/v1/chat/completions,http://[2605:340:cd51:7700:ed84:8d30:c89c:ca0a]:8000/v1/chat/completions,http://[2605:340:cd51:7700:ed84:8d30:c89c:ca0a]:8000/v1/chat/completions,http://[2605:340:cd51:7700:8978:4517:4283:273a]:8000/v1/chat/completions,http://[2605:340:cd51:7700:eb97:8e80:414c:c3f5]:8000/v1/chat/completions,http://[2605:340:cd51:7700:eb97:8e80:414c:c3f5]:8000/v1/chat/completions,http://[2605:340:cd51:7700:3dbc:b7c3:dd35:8009]:8000/v1/chat/completions,http://[2605:340:cd51:7700:cc59:6632:c1ae:8f1e]:8000/v1/chat/completions,http://[2605:340:cd51:7700:56f1:b739:c035:c85]:8000/v1/chat/completions,http://[2605:340:cd51:7700:b19d:b7c:f434:1f1c]:8000/v1/chat/completions" \
-   --judge-vllm-model gpt-oss-120b \
-   --judge-vllm-temperature 0.2 \
-   --judge-max-rounds 1 \
-   --continue-on-error \
-   --hdfs-output-dir "hdfs://harunawl/home/byte_data_seed_wl/user/xingtianshun/deepwiki_data" \
-   --log-level INFO
-
-
+export DEEPWIKI_VLLM_OUTAGE_THRESHOLD=30
 python deepwiki_mcp_client.py \
    --parquet-all \
    --parquet-input-dir /mnt/hdfs/userx/shanyong/code/code_wiki/deepwiki \
    --parquet-scan-batch-size 128 \
    --repo-mp-workers 96 \
    --repo-workers 1 \
-   --max-workers 4 \
-   --section-workers 4 \
+   --max-workers 8 \
+   --section-workers 8 \
    --repo-cache-dir /tmp/deepwiki_repo_cache \
    --repo-cache-cleanup on-success \
    --narrative-output-dir result_data/batch_narratives \
@@ -123,22 +67,6 @@ python deepwiki_mcp_client.py \
    --skip-existing \
    --log-level INFO
 ```
---skip-existing \
-说明：当同时设置 `--skip-existing` 和 `--hdfs-output-dir` 时，会优先检查 HDFS 上是否已存在该 repo 对应的输出子目录；若目录已存在则直接跳过该 repo 的生成与上传（实现上会先对 `--hdfs-output-dir` 做一次非递归索引，避免每个 repo 都频繁调用 HDFS 命令）。
-
-说明：当使用 server pooling（`--*-vllm-server-urls`）时，会对 endpoints 做去重；请求侧使用 round-robin（每次请求轮换起始 endpoint）来让所有节点参与分摊，并对连接/超时等瞬态失败的节点做短暂冷却剔除，避免持续打到坏节点；`--*-vllm-retries/--*-vllm-retry-backoff/--*-vllm-timeout` 也会应用到 pooling 调用路径。
-
-多 worker 并发：如果你启动多个互相独立的 worker 实例（没有共享队列/状态），可以用 `--shard-count/--shard-index` 对 repo 做确定性分片，避免重复处理同一批数据。例如启动 8 个 worker：
-- worker0: `--shard-count 8 --shard-index 0`
-- worker1: `--shard-count 8 --shard-index 1`
-- ...
---repo-workers 4：控制每个批次中最多同时处理几个仓库（也就是跨仓库的线程池规模）
---repo-batch-size 64：把总体仓库列表切成每批最多 64 个，逐批顺序执行，避免一次性启动太多仓库
---max-workers 4：只影响单个仓库内部的页面级并发度（DeepWikiPipeline的线程池）
---section-workers 8：在单个页面内部把 section 并行化（可选；默认每页串行），适合“页少但 section 很多”的仓库
---disable-hydration：关闭源码引用回填（faster，且避免大规模并发时被磁盘/网络盘 I/O 卡住）
---hydration-timeout 0.5：每个 section 的回填最多耗时 0.5s，超时则跳过回填继续跑
---hydration-workers 4：每个 repo 内回填任务的最大并发（配合 section-workers 防止 I/O 放大）
 
 # 提取数据
 
@@ -169,6 +97,11 @@ python utils/multipro_parquet_token.py \
    --workers 128 \
    --mp-start spawn
 
+# 统计800repo的纯wiki量
+python utils/token_count_parquet_by_repo_map.py \
+   --parquet-base /mnt/hdfs/userx/shanyong/code/code_wiki/deepwiki \
+   --repo-map /opt/tiger/oss_server_only/DeepwikiPipline/result_data/repo_hdfs_map.json \
+   --workers 16 --mp-start spawn
 # 30min 200repo
 # 1h 400repo
 
@@ -235,3 +168,10 @@ python utils/export_narratives_to_parquet.py \
    --base /mnt/hdfs/user_wl/xingtianshun/deepwiki_data \
    --output /mnt/hdfs/user_wl/xingtianshun/deepwiki_handover/4w_wiki_repo_level_narratives_12B.parquet \
    --workers 16 --mp-start spawn
+
+folder：deepwiki_data 下的子目录名
+filepath：文件的完整路径
+repo：reponame
+narrative：repo-level的一整条数据(将section用\n\n拼接)
+rows：当前repo的section个数
+missing_rows：拼接时被跳过的条数

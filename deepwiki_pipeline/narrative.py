@@ -7,6 +7,7 @@ import os
 import re
 import textwrap
 import time
+import threading
 from dataclasses import dataclass
 from typing import Iterator, List, Optional, Sequence, Tuple, Set
 
@@ -274,6 +275,49 @@ def _should_bypass_llm_for_section(text: str) -> bool:
     return len(text) >= _section_prompt_char_limit()
 
 
+def _vllm_outage_threshold() -> int:
+    raw = (os.getenv("DEEPWIKI_VLLM_OUTAGE_THRESHOLD") or "").strip()
+    if not raw:
+        return 0
+    try:
+        value = int(raw)
+    except ValueError:
+        return 0
+    return max(0, value)
+
+
+class _VLLMOutageGuard:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._consecutive_failures = 0
+
+    def note_success(self) -> None:
+        threshold = _vllm_outage_threshold()
+        if threshold <= 0:
+            return
+        with self._lock:
+            self._consecutive_failures = 0
+
+    def note_failure(self, exc: Exception) -> None:
+        threshold = _vllm_outage_threshold()
+        if threshold <= 0:
+            return
+        if not _is_vllm_connectivity_error(exc):
+            return
+        with self._lock:
+            self._consecutive_failures += 1
+            failures = self._consecutive_failures
+        if failures >= threshold:
+            # Use SystemExit so upstream callers that catch Exception do not swallow the abort.
+            raise SystemExit(
+                f"Aborting: vLLM appears unreachable for {failures} consecutive requests "
+                f"(threshold={threshold}). Last error: {exc}"
+            )
+
+
+_VLLM_OUTAGE_GUARD = _VLLMOutageGuard()
+
+
 def _is_context_length_error(exc: Exception) -> bool:
     """
     Detect token/context overflow style failures from vLLM/OpenAI-compatible servers.
@@ -290,6 +334,37 @@ def _is_context_length_error(exc: Exception) -> bool:
         "request too large",
         "max_tokens must be at least 1",
         "got -",  # common when server computes negative remaining max_tokens
+    )
+    return any(p in message for p in patterns)
+
+
+def _is_vllm_connectivity_error(exc: Exception) -> bool:
+    """
+    Best-effort classification: treat network/connectivity/server outage failures as fatal signals.
+    Excludes context-length / bad-request style prompt sizing errors.
+    """
+    if _is_context_length_error(exc):
+        return False
+    message = str(exc or "").lower()
+    if not message:
+        return False
+    patterns = (
+        "connection refused",
+        "connect timeout",
+        "read timeout",
+        "timed out",
+        "name or service not known",
+        "temporary failure in name resolution",
+        "failed to establish a new connection",
+        "connection error",
+        "connecterror",
+        "server disconnected",
+        "remote end closed connection",
+        "502 bad gateway",
+        "503 service unavailable",
+        "504 gateway timeout",
+        "request failed after",
+        "across server pool",
     )
     return any(p in message for p in patterns)
 
@@ -610,6 +685,10 @@ def rewrite_section(
             retry_backoff=llm_config.retry_backoff,
         )
     except VLLMError as exc:  # pragma: no cover
+        try:
+            _VLLM_OUTAGE_GUARD.note_failure(exc)
+        except SystemExit:
+            raise
         logger.warning(
             "Section rewrite failed for %s :: %s: %s",
             page_title,
@@ -619,6 +698,7 @@ def rewrite_section(
         if _is_context_length_error(exc):
             return section_text.strip() or fallback
         return fallback
+    _VLLM_OUTAGE_GUARD.note_success()
     elapsed = time.time() - started_at
     if elapsed >= 30.0:
         logger.warning(
@@ -699,6 +779,10 @@ def critique_block(
             retry_backoff=judge_config.retry_backoff,
         )
     except VLLMError as exc:  # pragma: no cover
+        try:
+            _VLLM_OUTAGE_GUARD.note_failure(exc)
+        except SystemExit:
+            raise
         logger.warning(
             "Critic LLM failed for %s :: %s (block %d): %s",
             page_title,
@@ -711,6 +795,7 @@ def critique_block(
             text="Critic inference failed; please review manually.",
             misalignment=MisalignmentType.INCONSISTENT,
         )
+    _VLLM_OUTAGE_GUARD.note_success()
     critic_text = response.strip()
     if not critic_text:
         return CriticFeedback(
@@ -817,6 +902,10 @@ def critique_section(
             retry_backoff=judge_config.retry_backoff,
         )
     except VLLMError as exc:  # pragma: no cover
+        try:
+            _VLLM_OUTAGE_GUARD.note_failure(exc)
+        except SystemExit:
+            raise
         logger.warning(
             "Section critic failed for %s :: %s: %s",
             page_title,
@@ -828,6 +917,7 @@ def critique_section(
             text="Critic inference failed; please review manually.",
             misalignment=MisalignmentType.INCONSISTENT,
         )
+    _VLLM_OUTAGE_GUARD.note_success()
     critic_text = response.strip()
     if not critic_text:
         return CriticFeedback(
@@ -925,6 +1015,10 @@ def refine_block(
             retry_backoff=llm_config.retry_backoff,
         )
     except VLLMError as exc:  # pragma: no cover
+        try:
+            _VLLM_OUTAGE_GUARD.note_failure(exc)
+        except SystemExit:
+            raise
         logger.warning(
             "Refinement failed for %s :: %s (block %d): %s",
             page_title,
@@ -933,6 +1027,7 @@ def refine_block(
             exc,
         )
         return current_text
+    _VLLM_OUTAGE_GUARD.note_success()
     refined = response.strip()
     cleaned = _sanitize_visible_text(refined or current_text)
     return cleaned if cleaned else current_text
@@ -998,6 +1093,10 @@ def refine_section(
             retry_backoff=llm_config.retry_backoff,
         )
     except VLLMError as exc:  # pragma: no cover
+        try:
+            _VLLM_OUTAGE_GUARD.note_failure(exc)
+        except SystemExit:
+            raise
         logger.warning(
             "Section refinement failed for %s :: %s: %s",
             page_title,
@@ -1005,6 +1104,7 @@ def refine_section(
             exc,
         )
         return current_text
+    _VLLM_OUTAGE_GUARD.note_success()
     refined = response.strip()
     cleaned = _sanitize_visible_text(refined or current_text)
     return cleaned if cleaned else current_text
