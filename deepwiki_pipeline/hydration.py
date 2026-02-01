@@ -13,13 +13,16 @@ logger = logging.getLogger(__name__)
 
 BracketKey = Tuple[str, int, int]
 
-PATH_RANGE_RE = re.compile(r"([A-Za-z0-9_.\-/]+):(\d+)(?:-(\d+))?")
-PATH_ALLOWED_RE = re.compile(r"^[A-Za-z0-9_.\-/]+$")
+# Allow spaces in repo-relative paths (common in educational repos).
+# We still validate and enforce repo-root containment via resolve()+relative_to().
+PATH_RANGE_RE = re.compile(r"([A-Za-z0-9_.\-/ ]+):(\d+)(?:-(\d+))?")
+PATH_ALLOWED_RE = re.compile(r"^[A-Za-z0-9_.\-/ ]+$")
 MAX_PATH_LEN = 240
 DETAILS_BLOCK_RE = re.compile(
     r"<details\b[^>]*?>.*?</details>",
     re.IGNORECASE | re.DOTALL,
 )
+SOURCES_INLINE_RE = re.compile(r"^\s*(?:\*\*)?sources(?:\*\*)?\s*:\s*(.+)$", re.IGNORECASE)
 
 _LANGUAGE_BY_SUFFIX = {
     ".py": "python",
@@ -63,9 +66,11 @@ def _is_valid_path(path: str) -> bool:
         not path
         or path.startswith("-")
         or "*" in path
-        or " " in path
         or len(path) > MAX_PATH_LEN
     ):
+        return False
+    # Reject non-space whitespace to avoid hidden/control characters in paths.
+    if any(ch.isspace() and ch != " " for ch in path):
         return False
     if PATH_ALLOWED_RE.match(path) is None:
         return False
@@ -307,6 +312,34 @@ def _hydrate_line_references(
     for raw_line in text.splitlines():
         hydrated_lines.append(raw_line)
         stripped = raw_line.strip()
+        # Support inline Sources lists such as:
+        # Sources: `a/b.py`, `c/d.py:3-10`
+        m = SOURCES_INLINE_RE.match(raw_line)
+        if m:
+            segment = m.group(1).strip()
+            candidates: List[str] = []
+            # Prefer backtick-delimited paths to preserve spaces.
+            ticked = re.findall(r"`([^`]+)`", segment)
+            if ticked:
+                candidates.extend(item.strip() for item in ticked if item and item.strip())
+            else:
+                # Fall back to comma-separated tokens.
+                candidates.extend(item.strip() for item in segment.split(",") if item and item.strip())
+            for candidate_item in candidates:
+                parsed_item = _parse_reference_string(candidate_item)
+                if not parsed_item:
+                    continue
+                path, start, end = parsed_item
+                key = (path, start, end)
+                if key not in cache:
+                    cache[key] = _load_snippet(repo_root, path=path, start=start, end=end)
+                snippet = cache[key]
+                if not snippet or key in embedded:
+                    continue
+                embedded.add(key)
+                hydrated_lines.append(_format_snippet(path, start, end, snippet))
+            continue
+
         candidate = stripped
         if stripped.lower().startswith("source:"):
             candidate = stripped.split(":", 1)[1].strip()

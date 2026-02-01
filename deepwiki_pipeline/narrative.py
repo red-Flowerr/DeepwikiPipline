@@ -39,6 +39,10 @@ def _truncate(text: str, limit: int = 4000) -> str:
 
 
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+_DETAILS_BLOCK_RE = re.compile(
+    r"<details\b[^>]*?>.*?</details>",
+    re.IGNORECASE | re.DOTALL,
+)
 _ABSTRACT_VERBS = {
     "coordinate",
     "orchestrate",
@@ -288,6 +292,89 @@ def _is_context_length_error(exc: Exception) -> bool:
         "got -",  # common when server computes negative remaining max_tokens
     )
     return any(p in message for p in patterns)
+
+
+def _strip_details_blocks(text: str) -> str:
+    """
+    Remove <details> blocks (page-level context file listings) before extracting indices.
+    These are typically global context rather than paragraph-specific evidence.
+    """
+    return _DETAILS_BLOCK_RE.sub("", text or "")
+
+
+_SOURCES_INLINE_RE = re.compile(
+    r"(?i)^\s*(?:\*\*|__)?\s*sources?\s*(?:\*\*|__)?\s*[:：\-–—]\s*(?P<rest>.*)$",
+    re.MULTILINE,
+)
+_BACKTICK_RE = re.compile(r"`([^`]+)`")
+
+
+def _extract_section_index_labels(section_text: str) -> Tuple[Set[str], Set[str]]:
+    """
+    Extract repo-relative file references from a section for code-appending.
+
+    We focus on paragraph-level indices and ignore page-level <details> context lists.
+    Returns (ranged_labels, unranged_labels).
+    """
+    text = _strip_details_blocks(section_text)
+    ranged: Set[str] = set()
+    unranged: Set[str] = set()
+
+    def add(label: str) -> None:
+        cleaned = (label or "").strip()
+        while cleaned.startswith(("- ", "* ", "• ")):
+            cleaned = cleaned[2:].strip()
+        cleaned = re.sub(r"^\d+\.\s+", "", cleaned).strip()
+        cleaned = _sanitize_reference_label(cleaned)
+        if not cleaned:
+            return
+        if re.search(r":\d+", cleaned):
+            ranged.add(cleaned)
+        else:
+            unranged.add(cleaned)
+
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        m = _SOURCES_INLINE_RE.match(line)
+        if not m:
+            i += 1
+            continue
+        rest = (m.group("rest") or "").strip()
+        if rest:
+            items = [x.strip() for x in _BACKTICK_RE.findall(rest) if x.strip()]
+            if not items:
+                items = [x.strip() for x in re.split(r"[;,，]", rest) if x.strip()]
+            for item in items:
+                add(item)
+            i += 1
+            continue
+        # Block form: subsequent bullets / ordered items.
+        i += 1
+        while i < len(lines):
+            nxt = lines[i].strip()
+            if not nxt:
+                break
+            if not (nxt.startswith(("- ", "* ", "• ")) or re.match(r"^\d+\.\s+", nxt)):
+                break
+            candidates = [x.strip() for x in _BACKTICK_RE.findall(nxt) if x.strip()]
+            if candidates:
+                for item in candidates:
+                    add(item)
+            else:
+                add(nxt)
+            i += 1
+
+    # Also include any label lines produced by hydration blocks. These are safe because
+    # they're immediately followed by a fenced code block.
+    for m in re.finditer(
+        r"(?ms)^(?P<label>[A-Za-z0-9_.\-/ ]+(?::\d+(?:-\d+)?)?)\s*\n```",
+        text,
+    ):
+        add(m.group("label") or "")
+
+    return ranged, unranged
 
 def summarise_page(
     *,
@@ -1028,7 +1115,8 @@ def make_block_result(
     )
 
 
-_CODE_LABEL_RE = re.compile(r"^[A-Za-z0-9_.\-/]+(?::\d+(?:-\d+)?)?$")
+# Allow spaces in repo-relative paths (some educational repos use them).
+_CODE_LABEL_RE = re.compile(r"^[A-Za-z0-9_.\-/ ]+(?::\d+(?:-\d+)?)?$")
 _REFERENCE_INVALID_TOKENS = {"null", "none", ".", ".."}
 
 
@@ -1170,6 +1258,34 @@ def _extract_code_blocks(section_text: str, sources_iter: Optional[Iterator[str]
     sources_pattern = re.compile(r"\*\*Sources:\*\*", re.IGNORECASE)
     code_pattern = re.compile(r"```([^\n`]*)\n(.*?)```", re.DOTALL)
     blocks: List[SectionBlock] = []
+    # First, include already-hydrated snippet blocks, which look like:
+    # path/to/file.py:10-20
+    # ```lang
+    # ...
+    # ```
+    hydrated_pattern = re.compile(
+        r"(?m)^(?P<label>[A-Za-z0-9_.\-/]+(?::\d+(?:-\d+)?)?)\s*\n```(?P<lang>[^\n`]*)\n(?P<body>.*?)```",
+        re.DOTALL,
+    )
+    seen_hydrated: Set[Tuple[str, str]] = set()
+    for match in hydrated_pattern.finditer(section_text):
+        label = _sanitize_reference_label(match.group("label") or "") or ""
+        lang = (match.group("lang") or "").strip().lower() or "text"
+        body = (match.group("body") or "").strip("\n")
+        if not body:
+            continue
+        key = (label, body[:64])
+        if key in seen_hydrated:
+            continue
+        seen_hydrated.add(key)
+        blocks.append(
+            SectionBlock(
+                explanation=label,
+                code=body,
+                language=lang,
+                mermaid=body if lang == "mermaid" else None,
+            )
+        )
     search_pos = 0
     while True:
         sources_match = sources_pattern.search(section_text, search_pos)
@@ -1212,6 +1328,11 @@ def _extract_code_blocks(section_text: str, sources_iter: Optional[Iterator[str]
     return blocks
 
 
+def _is_readme_like(label: str) -> bool:
+    lowered = (label or "").strip().lower()
+    return lowered.startswith("readme") or lowered.endswith((".md", ".rst", ".txt"))
+
+
 def make_section_result(
     *,
     repo: str,
@@ -1224,6 +1345,7 @@ def make_section_result(
 ) -> SectionResult:
     sources = _extract_section_sources(section_text)
     code_blocks = _extract_code_blocks(section_text, iter(sources))
+    ranged_labels, unranged_labels = _extract_section_index_labels(section_text)
     bypass_llm = bool(logic_config and _should_bypass_llm_for_section(section_text))
     if bypass_llm:
         narrative = section_text.strip()
@@ -1311,7 +1433,35 @@ def make_section_result(
     augmented_narrative = current_text
     if not bypass_llm and code_blocks:
         appendix: List[str] = []
-        for idx, block in enumerate(code_blocks, 1):
+        selected_blocks: List[SectionBlock] = []
+
+        # Append code for every index referenced in the prompt/section context.
+        # Ranged indices are included, and unranged indices are also included (can be large).
+        selected_labels: Set[str] = set(ranged_labels) | set(unranged_labels)
+
+        def label_matches(block_label: str) -> bool:
+            if not block_label:
+                return False
+            clean = _sanitize_reference_label(block_label) or ""
+            if not clean:
+                return False
+            if clean in selected_labels:
+                return True
+            # If we selected a ranged label, accept exact path matches as well when the block contains full-file content.
+            if ":" not in clean:
+                for wanted in selected_labels:
+                    if wanted.startswith(clean + ":") or wanted == clean:
+                        return True
+            return False
+
+        for block in code_blocks:
+            label = (block.explanation or "").strip()
+            if not label_matches(label):
+                continue
+            # Keep readme-like sources too; they are part of the prompt context and requested for completeness.
+            selected_blocks.append(block)
+
+        for idx, block in enumerate(selected_blocks, 1):
             code_body = (block.code or "").strip()
             if not code_body:
                 continue

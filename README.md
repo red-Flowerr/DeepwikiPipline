@@ -115,11 +115,12 @@ python deepwiki_mcp_client.py \
    --narrative-format json \
    --narrative-modes code critic \
    --design-use-vllm \
-   --design-vllm-server-urls "http://[2605:340:cd51:7700:5ae2:c8f3:778:a9d0]:8000/v1/chat/completions,http://[2605:340:cd51:7700:286a:3a59:f4f2:b989]:8000/v1/chat/completions,http://[2605:340:cd51:7700:3930:80b8:8d05:f633]:8000/v1/chat/completions,http://[2605:340:cd51:7700:77b0:be0f:674c:6fe0]:8000/v1/chat/completions,http://[2605:340:cd51:7700:13a8:94f8:597d:e509]:8000/v1/chat/completions,http://[2605:340:cd51:7700:3e72:4aa3:98c9:48e5]:8000/v1/chat/completions,http://[2605:340:cd51:7700:f233:7336:e8dd:6fbf]:8000/v1/chat/completions,http://[2605:340:cd51:7700:97c6:18fe:be8d:f5d]:8000/v1/chat/completions,http://[2605:340:cd51:7700:631d:5d4a:832f:5d27]:8000/v1/chat/completions,http://[2605:340:cd51:7700:98af:4a95:177c:10c4]:8000/v1/chat/completions,http://[2605:340:cd51:7700:256:e584:4eb6:f6ea]:8000/v1/chat/completions,http://[2605:340:cd51:7700:58d7:64bd:e047:d7a]:8000/v1/chat/completions" \
+   --design-vllm-server-urls "http://[2605:340:cd51:7700:2398:bba5:7251:9a79]:8000/v1/chat/completions,http://[2605:340:cd51:7700:2dbb:7c35:26c9:bf7c]:8000/v1/chat/completions,http://[2605:340:cd51:7700:b7a:fd01:3787:7c89]:8000/v1/chat/completions,http://[2605:340:cd51:7700:eae3:c02a:fa98:af77]:8000/v1/chat/completions,http://[2605:340:cd51:7700:5fdc:9a08:e20a:7bfe]:8000/v1/chat/completions,http://[2605:340:cd51:7700:c532:8755:d45b:1067]:8000/v1/chat/completions,http://[2605:340:cd51:7700:fc3a:b90:519c:44a3]:8000/v1/chat/completions,http://[2605:340:cd51:7700:1796:e44f:d18c:7194]:8000/v1/chat/completions,http://[2605:340:cd51:7700:105:9f99:39dd:363a]:8000/v1/chat/completions,http://[2605:340:cd51:7700:65ee:2dfa:ca7a:a0c1]:8000/v1/chat/completions,http://[2605:340:cd51:7700:1286:adb6:1ec6:3dc9]:8000/v1/chat/completions,http://[2605:340:cd51:7700:6db7:7ec3:d7c3:c3d3]:8000/v1/chat/completions" \
    --design-vllm-model gpt-oss-120b \
    --design-vllm-temperature 0.7 \
    --continue-on-error \
    --hdfs-output-dir "hdfs://harunawl/home/byte_data_seed_wl/user/xingtianshun/deepwiki_data" \
+   --skip-existing \
    --log-level INFO
 ```
 --skip-existing \
@@ -146,14 +147,12 @@ python mcp_tool/hydrate_sections.py volcengine/verl \
   --repo-commit 809ae5 \
   --output result_data/verl_hydrated.txt
 
-# 统计token量
-python token_count_local.py \
-  --text_path result_data/verl_hydrated_clean.txt \
-  --tokenizer-path /mnt/hdfs/tiktok_aiic_new/user/codeai/hf_models/Qwen2.5-32B-Instruct \
-  --add-special-tokens
 
+
+
+# 测试vllm连通性
 python utils/vllm_load_test.py \
-   --urls "http://[2605:340:cd51:7700:cd6d:b7d4:77a1:d61e]]:8000/v1/chat/completions" \
+   --urls "http://[ipv6]:8000/v1/chat/completions" \
    --model gpt-oss-120b \
    --prompt "Summarize: hello world." \
    --max-tokens 131072 \
@@ -162,20 +161,77 @@ python utils/vllm_load_test.py \
    --requests 50 \
    --concurrency 16
 
-python utils/multipro_repo_zip_token.py \
-   --parquet-base /mnt/hdfs/userx/shanyong/code/code_wiki/deepwiki \
-   --workers 128 --mp-start spawn \
-   --retries 1 --retry-base-sleep 1 --retry-max-sleep 2 \
-   --results-jsonl /tmp/repo_zip_token_results.jsonl \
-   --failures-jsonl /tmp/new_repo_zip_token_failures.jsonl
 
+# 统计原始有多少wiki token量
 python utils/multipro_parquet_token.py \
    --base /mnt/hdfs/userx/shanyong/code/code_wiki/deepwiki \
    --column content \
    --workers 128 \
    --mp-start spawn
-find /mnt/hdfs/user_wl/xingtianshun/deepwiki_data -maxdepth 1 -type f -printf '%T@\n' \
-| sort -n \
-| awk 'NR==1{min=$1} END{print "跨度(s):", $1-min}'
+
 # 30min 200repo
 # 1h 400repo
+
+
+# 统计现在跑了多少token量
+python utils/multipro_raw_token.py \
+   --mode deepwiki_data \
+   --base /mnt/hdfs/user_wl/xingtianshun/deepwiki_data \
+   --workers 16 --mp-start spawn
+
+
+python utils/multipro_raw_token.py \
+   --mode deepwiki_data \
+   --base /mnt/hdfs/user_wl/xingtianshun/deepwiki_data \
+   --workers 16 --mp-start spawn \
+   --tokenizer-backend hf \
+   --hf-model /opt/tiger/oss_server_only/Qwen3-8B
+
+
+python utils/ipv6_to_urls.py <<'EOF'
+2605:340:cd51:7700:2398:bba5:7251:9a79
+2605:340:cd51:7700:2dbb:7c35:26c9:bf7c
+2605:340:cd51:7700:b7a:fd01:3787:7c89
+2605:340:cd51:7700:eae3:c02a:fa98:af77
+2605:340:cd51:7700:5fdc:9a08:e20a:7bfe
+2605:340:cd51:7700:c532:8755:d45b:1067
+2605:340:cd51:7700:fc3a:b90:519c:44a3
+2605:340:cd51:7700:1796:e44f:d18c:7194
+2605:340:cd51:7700:105:9f99:39dd:363a
+2605:340:cd51:7700:65ee:2dfa:ca7a:a0c1
+2605:340:cd51:7700:1286:adb6:1ec6:3dc9
+2605:340:cd51:7700:6db7:7ec3:d7c3:c3d3
+EOF
+
+
+python utils/token_count_indexed_code.py \
+   --narratives-dir result_data/batch_narratives \
+   --parquet-dir /mnt/hdfs/userx/shanyong/code/code_wiki/deepwiki \
+   --cache-dir /tmp/deepwiki_repo_cache \
+   --hdfs-bin hdfs \
+   --encoding cl100k_base \
+   --repo-workers 64 \
+   > token_count_indexed_code.log 2>&1 &
+
+
+python utils/extract_repo_hdfs_map.py \
+--narratives-dir result_data/batch_narratives \
+--parquet-dir /mnt/hdfs/userx/shanyong/code/code_wiki/deepwiki \
+--output result_data/repo_hdfs_map.json
+
+
+python utils/token_count_from_repo_indices.py \
+   --repo-indices /opt/tiger/oss_server_only/DeepwikiPipline/result_data/repo_indices.json \
+   --repo-hdfs-map /opt/tiger/oss_server_only/DeepwikiPipline/result_data/repo_hdfs_map.json \
+   --cache-dir /tmp/deepwiki_repo_cache \
+   --hdfs-bin hdfs \
+   --encoding cl100k_base \
+   --repo-workers 16 \
+   --progress
+
+# 交付数据
+
+python utils/export_narratives_to_parquet.py \
+   --base /mnt/hdfs/user_wl/xingtianshun/deepwiki_data \
+   --output /mnt/hdfs/user_wl/xingtianshun/deepwiki_handover/4w_wiki_repo_level_narratives_12B.parquet \
+   --workers 16 --mp-start spawn
