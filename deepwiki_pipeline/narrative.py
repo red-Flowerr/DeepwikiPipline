@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import textwrap
 import time
@@ -209,44 +210,33 @@ PAGE_SUMMARY_SYSTEM_PROMPT = (
 )
 
 BLOCK_REWRITE_SYSTEM_PROMPT = (
-    "You are reconstructing the author's thinking process at the moment this code was written.\n\n"
+    "You are reconstructing BOTH the design-time reasoning and the resulting design decisions for a piece of code.\n\n"
     "You are given:\n"
-    "- Explanatory text from a project wiki (high-level, post-hoc descriptions)\n"
+    "- Explanatory text from a project wiki (often high-level, sometimes incomplete)\n"
     "- One or more related code snippets\n\n"
-    "Your task is NOT to summarize the wiki or explain how the code works.\n\n"
-    "Instead, infer and articulate the design-time reasoning that likely preceded the code:\n"
-    "- What problems or constraints the author was facing\n"
-    "- What options they likely considered and rejected\n"
-    "- What trade-offs or assumptions shaped the final structure\n"
-    "- Why this specific form was chosen over simpler or more obvious alternatives\n\n"
-    "Write from the perspective of someone about to implement the code, thinking aloud internally.\n\n"
-    "Guidelines:\n"
-    "- Do not restate wiki explanations or architecture descriptions.\n"
-    "- Do not describe the code line by line.\n"
-    "- Focus on decision-making, not outcomes.\n"
-    "- It is acceptable to make reasonable assumptions if they are implied by the code.\n"
-    "- Write in natural technical prose, as if explaining your reasoning to another senior engineer before coding.\n"
-    "- Do not use Markdown tables, bullet lists, or other rigid formatting; express trade-offs in flowing prose.\n\n"
-    "You may reference the code abstractly, and you may insert short inline comments (e.g. “at this point I realized…”) "
-    "to anchor the reasoning, but do not paste or quote large code blocks.\n\n"
-    "The output should read like a design notebook entry written before the code existed."
+    "Your goal is NOT to summarize the wiki, and NOT to explain the code line-by-line.\n\n"
+    "Instead, write a rich engineering note that includes:\n"
+    "1) Design-time thinking: constraints, risks, alternatives considered, trade-offs, sequencing.\n"
+    "2) Design outcome: the chosen structure/architecture, key components & responsibilities, important interfaces/contracts,\n"
+    "   invariants, and failure handling strategy.\n\n"
+    "Write in natural technical prose. You may use short section headers (e.g. 'Reasoning', 'Chosen Design', 'Trade-offs',\n"
+    "'Failure Modes') but avoid rigid formatting like tables. Prefer concrete details over vague statements.\n\n"
+    "Be generous with detail: expand the content when possible, grounding claims in what is implied by the code and the wiki.\n"
+    "If something is uncertain, state the assumption explicitly.\n\n"
+    "Do NOT paste large code blocks into the rewritten narrative; code will be appended separately by the pipeline."
 )
 
 CRITIC_SYSTEM_PROMPT = (
-    "You are evaluating whether the following text reflects genuine design-time coding reasoning.\n\n"
-    "Criteria:\n"
-    "- Does the text describe constraints, trade-offs, or uncertainties faced before implementation?\n"
-    "- Does it avoid restating documentation or explaining the finished system?\n"
-    "- Does it focus on decisions rather than describing what the code does?\n"
-    "- Does it read like a developer thinking through a problem, not teaching it?\n\n"
-    "If the text mainly:\n"
-    "- Summarizes wiki content\n"
-    "- Explains architecture after the fact\n"
-    "- Describes code behavior instead of decision rationale\n\n"
-    "Then it is misaligned.\n\n"
+    "You are evaluating whether the following text is a high-quality engineering note.\n\n"
+    "The note must include BOTH:\n"
+    "- Design-time reasoning (constraints, trade-offs, alternatives, sequencing, risks)\n"
+    "- Design outcome (what was chosen: structure/architecture, responsibilities, interfaces/contracts, invariants, failure handling)\n\n"
+    "Reject notes that are too short, too generic, or that only do one of the two (reasoning-only or outcome-only).\n"
+    "Reject notes that simply restate the wiki or explain code line-by-line.\n\n"
     "Respond with:\n"
     "PASS or FAIL\n\n"
-    "If FAIL, briefly explain what kind of reasoning is missing or what the text does instead."
+    "If FAIL, explain precisely what is missing (e.g. 'no explicit trade-offs', 'no concrete design outcome', 'missing failure modes',\n"
+    "'only summarizes wiki', 'too generic')."
 )
 
 REFINEMENT_REMINDER = (
@@ -258,6 +248,46 @@ SECTION_REWRITE_SYSTEM_PROMPT = BLOCK_REWRITE_SYSTEM_PROMPT
 
 SECTION_CRITIC_SYSTEM_PROMPT = CRITIC_SYSTEM_PROMPT
 
+
+def _section_prompt_char_limit() -> int:
+    raw = (os.getenv("DEEPWIKI_SECTION_PROMPT_CHAR_LIMIT") or "").strip()
+    if raw:
+        try:
+            value = int(raw)
+            if value > 0:
+                return value
+        except ValueError:
+            pass
+    # Default: 128k characters. This is a pragmatic guardrail to avoid sending
+    # extremely large prompts to vLLM and to preserve raw hydrated context when
+    # it would otherwise fail.
+    return 131_072
+
+
+def _should_bypass_llm_for_section(text: str) -> bool:
+    if not text:
+        return False
+    return len(text) >= _section_prompt_char_limit()
+
+
+def _is_context_length_error(exc: Exception) -> bool:
+    """
+    Detect token/context overflow style failures from vLLM/OpenAI-compatible servers.
+    We intentionally use string matching so this works across differing client/server error types.
+    """
+    message = str(exc or "").lower()
+    if not message:
+        return False
+    patterns = (
+        "maximum context length",
+        "context length",
+        "too many tokens",
+        "prompt is too long",
+        "request too large",
+        "max_tokens must be at least 1",
+        "got -",  # common when server computes negative remaining max_tokens
+    )
+    return any(p in message for p in patterns)
 
 def summarise_page(
     *,
@@ -449,6 +479,8 @@ def rewrite_section(
     )
     if not llm_config or not call_vllm_chat or not ChatMessage:
         return fallback
+    if _should_bypass_llm_for_section(section_text):
+        return section_text.strip() or fallback
     user_prompt = textwrap.dedent(
         f"""\
         Repository: {repo}
@@ -458,9 +490,12 @@ def rewrite_section(
         Hydrated section contents (original prose + code fences):
         {section_text.strip()}
 
-        Reconstruct the author's reasoning before this work existed.
-        Concentrate on constraints, discarded options, trade-offs, sequencing, and open risks. Keep it as a planning monologue.
-        Do not restate the wiki or describe completed behavior, and avoid Markdown tables or bullet lists—use flowing prose instead.
+        Task:
+        - Expand into a rich engineering note that includes BOTH design-time thinking AND the final design outcome.
+        - Design-time thinking: constraints, risks, alternatives rejected, trade-offs, sequencing.
+        - Design outcome: chosen structure/architecture, component responsibilities, interfaces/contracts, invariants, failure handling.
+        - Be concrete and detailed; it is OK to make explicit assumptions if needed.
+        - Do NOT paste large code blocks in the narrative; code is appended separately.
         """
     )
     messages = [
@@ -494,6 +529,8 @@ def rewrite_section(
             section_heading,
             exc,
         )
+        if _is_context_length_error(exc):
+            return section_text.strip() or fallback
         return fallback
     elapsed = time.time() - started_at
     if elapsed >= 30.0:
@@ -525,6 +562,12 @@ def critique_block(
         return CriticFeedback(
             verdict="PASS",
             text="No critic LLM configured; manual verification required.",
+            misalignment=MisalignmentType.NONE,
+        )
+    if _should_bypass_llm_for_section(rewritten_text):
+        return CriticFeedback(
+            verdict="PASS",
+            text="Skipped critic due to long context; preserved raw section content.",
             misalignment=MisalignmentType.NONE,
         )
     user_prompt = textwrap.dedent(
@@ -641,6 +684,12 @@ def critique_section(
             text="No critic LLM configured; manual verification required.",
             misalignment=MisalignmentType.NONE,
         )
+    if _should_bypass_llm_for_section(narrative):
+        return CriticFeedback(
+            verdict="PASS",
+            text="Skipped critic due to long context; preserved raw section content.",
+            misalignment=MisalignmentType.NONE,
+        )
     code_text = _truncate(_join_code_blocks(code_blocks), 6000) if code_blocks else "(no code snippets detected)"
     user_prompt = textwrap.dedent(
         f"""\
@@ -739,6 +788,8 @@ def refine_block(
 ) -> str:
     if not llm_config or not call_vllm_chat or not ChatMessage:
         return current_text
+    if _should_bypass_llm_for_section(current_text):
+        return current_text
     reminder = f"Primary issue: {critic.misalignment.value}" if critic.misalignment else "Primary issue: none reported"
     user_prompt = textwrap.dedent(
         f"""\
@@ -811,6 +862,8 @@ def refine_section(
     llm_config: Optional[NarrativeLLMConfig],
 ) -> str:
     if not llm_config or not call_vllm_chat or not ChatMessage:
+        return current_text
+    if _should_bypass_llm_for_section(current_text):
         return current_text
     reminder = f"Primary issue: {critic.misalignment.value}" if critic.misalignment else "Primary issue: none reported"
     code_text = _truncate(_join_code_blocks(code_blocks), 6000) if code_blocks else "(no code snippets detected)"
@@ -1171,15 +1224,19 @@ def make_section_result(
 ) -> SectionResult:
     sources = _extract_section_sources(section_text)
     code_blocks = _extract_code_blocks(section_text, iter(sources))
-    narrative = rewrite_section(
-        repo=repo,
-        page_title=page_title,
-        section_heading=section_heading,
-        section_text=section_text,
-        code_blocks=code_blocks,
-        llm_config=logic_config,
-        fallback_subject=section_heading,
-    )
+    bypass_llm = bool(logic_config and _should_bypass_llm_for_section(section_text))
+    if bypass_llm:
+        narrative = section_text.strip()
+    else:
+        narrative = rewrite_section(
+            repo=repo,
+            page_title=page_title,
+            section_heading=section_heading,
+            section_text=section_text,
+            code_blocks=code_blocks,
+            llm_config=logic_config,
+            fallback_subject=section_heading,
+        )
     logger.debug(
         "Section Draft[%s :: %s]: %s",
         page_title,
@@ -1194,46 +1251,54 @@ def make_section_result(
     )
     rounds = max(1, judge_rounds if critic_config else 1)
     current_text = narrative
-    for attempt in range(rounds):
-        feedback = critique_section(
-            repo=repo,
-            page_title=page_title,
-            section_heading=section_heading,
-            narrative=current_text,
-            code_blocks=code_blocks,
-            judge_config=critic_config,
+    if bypass_llm:
+        critic_history.append("Skipped LLM rewrite/critic due to long hydrated section context.")
+        final_feedback = CriticFeedback(
+            verdict="PASS",
+            text="Bypassed prompting due to long context; used raw hydrated section content.",
+            misalignment=MisalignmentType.NONE,
         )
-        critic_history.append(feedback.text)
-        final_feedback = feedback
-        logger.debug(
-            "Section Judge[%s :: %s :: pass %d]: verdict=%s misalignment=%s critic=%s",
-            page_title,
-            section_heading,
-            attempt + 1,
-            feedback.verdict,
-            feedback.misalignment.value if feedback.misalignment else "none",
-            _truncate(feedback.text, 300),
-        )
-        if feedback.verdict.upper() == "PASS" or not critic_config:
-            break
-        if attempt + 1 >= rounds:
-            break
-        current_text = refine_section(
-            repo=repo,
-            page_title=page_title,
-            section_heading=section_heading,
-            current_text=current_text,
-            critic=feedback,
-            code_blocks=code_blocks,
-            llm_config=logic_config,
-        )
-        logger.debug(
-            "Section Refine[%s :: %s :: pass %d]: %s",
-            page_title,
-            section_heading,
-            attempt + 2,
-            _truncate(current_text, 400),
-        )
+    else:
+        for attempt in range(rounds):
+            feedback = critique_section(
+                repo=repo,
+                page_title=page_title,
+                section_heading=section_heading,
+                narrative=current_text,
+                code_blocks=code_blocks,
+                judge_config=critic_config,
+            )
+            critic_history.append(feedback.text)
+            final_feedback = feedback
+            logger.debug(
+                "Section Judge[%s :: %s :: pass %d]: verdict=%s misalignment=%s critic=%s",
+                page_title,
+                section_heading,
+                attempt + 1,
+                feedback.verdict,
+                feedback.misalignment.value if feedback.misalignment else "none",
+                _truncate(feedback.text, 300),
+            )
+            if feedback.verdict.upper() == "PASS" or not critic_config:
+                break
+            if attempt + 1 >= rounds:
+                break
+            current_text = refine_section(
+                repo=repo,
+                page_title=page_title,
+                section_heading=section_heading,
+                current_text=current_text,
+                critic=feedback,
+                code_blocks=code_blocks,
+                llm_config=logic_config,
+            )
+            logger.debug(
+                "Section Refine[%s :: %s :: pass %d]: %s",
+                page_title,
+                section_heading,
+                attempt + 2,
+                _truncate(current_text, 400),
+            )
     learnability = compute_learnability_score(current_text)
     logger.debug(
         "Section Final[%s :: %s]: verdict=%s misalignment=%s learnability=%.3f",
@@ -1243,29 +1308,26 @@ def make_section_result(
         final_feedback.misalignment.value if final_feedback.misalignment else "none",
         learnability,
     )
-    references: List[str] = []
-    for block in code_blocks:
-        reference = block.explanation.strip()
-        code_body = block.code.strip()
-        if not reference or not code_body:
-            continue
-        ref_clean = reference.strip()
-        ref_lower = ref_clean.lower()
-        if (
-            not ref_clean
-            or ref_lower in {"null", "none", ".", ".."}
-            or not any(ch.isalnum() for ch in ref_clean)
-            or "readme" in ref_lower
-        ):
-            continue
-        snippet = (
-            f"With that plan in mind, I carried the implementation into {ref_clean}:\n"
-            f"{code_body}"
-        )
-        references.append(snippet)
     augmented_narrative = current_text
-    if references:
-        augmented_narrative = current_text.rstrip() + "\n\n" + "\n\n".join(references)
+    if not bypass_llm and code_blocks:
+        appendix: List[str] = []
+        for idx, block in enumerate(code_blocks, 1):
+            code_body = (block.code or "").strip()
+            if not code_body:
+                continue
+            label = (block.explanation or "").strip() or f"code_block_{idx}"
+            appendix.append(
+                "\n".join(
+                    [
+                        f"Original code ({label}):",
+                        f"```{block.language or 'text'}",
+                        code_body,
+                        "```",
+                    ]
+                )
+            )
+        if appendix:
+            augmented_narrative = current_text.rstrip() + "\n\n" + "\n\n".join(appendix)
     return SectionResult(
         narrative=augmented_narrative,
         critic=final_feedback.text,

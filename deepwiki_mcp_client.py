@@ -23,6 +23,11 @@ try:  # Optional progress indicator
 except ImportError:  # pragma: no cover
     tqdm = None
 
+try:  # Optional for multiprocess parquet streaming
+    import multiprocessing as mp
+except ImportError:  # pragma: no cover
+    mp = None  # type: ignore[assignment]
+
 from deepwiki_pipeline import (
     DeepWikiPipeline,
     MCPError,
@@ -44,6 +49,15 @@ class RepoTarget:
     repo: str
     commit: Optional[str] = None
     hdfs_zip_path: Optional[str] = None
+
+
+@dataclass
+class _ParquetStreamStats:
+    processed: int = 0
+    generated: int = 0
+    skipped_by_hdfs: int = 0
+    skipped_by_local: int = 0
+    errors: int = 0
 
 
 def _print_tools(session: Session) -> None:
@@ -567,6 +581,7 @@ def _iter_parquet_rows_from_parts(
     *,
     columns: Sequence[str],
     batch_size: int,
+    part_files: Optional[Sequence[Path]] = None,
 ) -> Iterable[Dict[str, Any]]:
     """
     Stream parquet rows part-by-part with a controlled batch size.
@@ -579,22 +594,27 @@ def _iter_parquet_rows_from_parts(
             "pyarrow is required for --parquet-input-dir. Install it with `pip install pyarrow`."
         ) from exc
 
-    part_files = sorted(
-        path for path in parquet_dir.iterdir() if path.is_file() and path.name.startswith("part-")
-    )
+    if part_files is None:
+        part_files = sorted(
+            path for path in parquet_dir.iterdir() if path.is_file() and path.name.startswith("part-")
+        )
+    else:
+        part_files = list(part_files)
     if not part_files:
         raise MCPError(f"No part-* parquet files found under {parquet_dir}")
 
+    cols = list(columns)
     for part in part_files:
         parquet_file = pq.ParquetFile(part)
-        for record_batch in parquet_file.iter_batches(batch_size=batch_size, columns=list(columns)):
-            table = record_batch.to_pydict()
-            if not table:
+        for record_batch in parquet_file.iter_batches(batch_size=batch_size, columns=cols):
+            # Avoid record_batch.to_pydict() (can be very expensive for large string columns).
+            # We only materialize per-column lists and stitch per-row dicts.
+            arrays = [record_batch.column(i).to_pylist() for i in range(record_batch.num_columns)]
+            if not arrays:
                 continue
-            keys = list(table.keys())
-            row_count = len(table[keys[0]]) if keys else 0
+            row_count = len(arrays[0])
             for idx in range(row_count):
-                yield {key: table[key][idx] for key in keys}
+                yield {cols[col_idx]: arrays[col_idx][idx] for col_idx in range(len(cols))}
 
 
 def _run_parquet_stream(
@@ -610,6 +630,9 @@ def _run_parquet_stream(
     Intended for very large datasets (e.g. ~40w repos) with bounded memory and limited HDFS reads.
     Concurrency is controlled by --repo-workers.
     """
+    if args.repo_mp_workers and mp is None:  # pragma: no cover
+        raise MCPError("Multiprocessing is unavailable in this environment.")
+
     dataset_dir = Path(args.output_dir or "result_data").expanduser()
     dataset_dir.mkdir(parents=True, exist_ok=True)
 
@@ -624,6 +647,9 @@ def _run_parquet_stream(
             merged_narrative_path = Path(args.narrative_output).expanduser()
             merged_narrative_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # NOTE: In parquet discovery mode, --parquet-max-repos is interpreted as
+    # "process the first N rows discovered from parquet" (regardless of skipping).
+    # This keeps the progress bar stable and makes limiting predictable.
     max_repos = None if args.parquet_all else args.parquet_max_repos
     prefix = args.parquet_repo_prefix.strip() if args.parquet_repo_prefix else None
     scan_batch_size = args.parquet_scan_batch_size or 64
@@ -651,25 +677,22 @@ def _run_parquet_stream(
     total = max_repos if max_repos is not None else _parquet_total_rows(parquet_dir)
     progress = tqdm(total=total, desc="Repositories", unit="repo", leave=True) if tqdm else None
 
-    processed = 0
+    stats = _ParquetStreamStats()
     errors: List[Tuple[str, Exception]] = []
-    skipped_by_hdfs = 0
-    skipped_by_local = 0
-    generated = 0
     counter_lock = threading.Lock()
 
     def log_skip_stats(*, force: bool = False) -> None:
         if args.progress_only:
             return
         interval = 2000
-        if not force and processed and processed % interval != 0:
+        if not force and stats.processed and stats.processed % interval != 0:
             return
         logger.info(
             "Skip stats: processed=%d generated=%d skipped_hdfs=%d skipped_local=%d errors=%d",
-            processed,
-            generated,
-            skipped_by_hdfs,
-            skipped_by_local,
+            stats.processed,
+            stats.generated,
+            stats.skipped_by_hdfs,
+            stats.skipped_by_local,
             len(errors),
         )
 
@@ -680,8 +703,7 @@ def _run_parquet_stream(
             return False
         return True
 
-    def worker(repo_name: str, content: str, hdfs_path: str) -> None:
-        nonlocal skipped_by_hdfs, skipped_by_local, generated
+    def process_repo(repo_name: str, content: str, hdfs_path: str) -> str:
         target = RepoTarget(repo=repo_name)
         dataset_path = dataset_dir / _dataset_filename(target, as_json=args.output_format == "json")
         narrative_path = None
@@ -698,24 +720,12 @@ def _run_parquet_stream(
                 hdfs_bin=args.hdfs_bin,
                 existing_paths=existing_hdfs_paths,
             ):
-                with counter_lock:
-                    skipped_by_hdfs += 1
-                if logger.isEnabledFor(logging.DEBUG):
-                    logger.debug("Skip repo=%s (HDFS directory exists).", repo_name)
-                return
+                return "skipped_hdfs"
             # Only fall back to local existence checks when HDFS skipping is not configured.
             if not args.hdfs_output_dir:
                 if dataset_path.exists() and (narrative_path is None or narrative_path.exists()):
-                    with counter_lock:
-                        skipped_by_local += 1
-                    if logger.isEnabledFor(logging.DEBUG):
-                        logger.debug("Skip repo=%s (local outputs exist).", repo_name)
-                    return
+                    return "skipped_local"
 
-        with counter_lock:
-            generated += 1
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug("Generate repo=%s.", repo_name)
         _execute_pipeline_for_target(
             session=None,
             target=target,
@@ -728,80 +738,217 @@ def _run_parquet_stream(
             print_to_stdout=False,
             parquet_row={"repo_name": repo_name, "content": content, "hdfs_path": hdfs_path},
         )
+        return "generated"
 
-    with ThreadPoolExecutor(max_workers=repo_workers) as executor:
-        in_flight: Dict[Any, str] = {}
-        in_flight_started_at: Dict[Any, float] = {}
-        for row in _iter_parquet_rows_from_parts(
+    part_files = sorted(
+        path for path in parquet_dir.iterdir() if path.is_file() and path.name.startswith("part-")
+    )
+    if not part_files:
+        raise MCPError(f"No part-* parquet files found under {parquet_dir}")
+
+    def iter_rows_for_worker(*, part_subset: Sequence[Path]) -> Iterable[Dict[str, Any]]:
+        return _iter_parquet_rows_from_parts(
             parquet_dir,
             columns=["repo_name", "content", "hdfs_path", "error_message"],
             batch_size=scan_batch_size,
-        ):
+            part_files=part_subset,
+        )
+
+    def run_worker_stream(
+        *,
+        part_subset: Sequence[Path],
+        progress_q: Optional[Any] = None,
+        shared_limit_counter: Optional[Any] = None,
+        shared_limit_lock: Optional[Any] = None,
+    ) -> None:
+        for row in iter_rows_for_worker(part_subset=part_subset):
+            if max_repos is not None and shared_limit_counter is not None and shared_limit_lock is not None:
+                with shared_limit_lock:
+                    if shared_limit_counter.value >= max_repos:
+                        break
+                    shared_limit_counter.value += 1
             repo_name = str(row.get("repo_name") or "").strip()
+            # Each row contributes 1 progress tick regardless of skip/generate.
             if not should_process_repo(repo_name):
-                if progress is not None:
-                    progress.update(1)
+                if progress_q is not None:
+                    progress_q.put(("tick", 1, 0, 0, 0, 0))
                 continue
             if row.get("error_message"):
-                if progress is not None:
-                    progress.update(1)
+                if progress_q is not None:
+                    progress_q.put(("tick", 1, 0, 0, 0, 0))
                 continue
             content = str(row.get("content") or "")
             hdfs_path = str(row.get("hdfs_path") or "").strip()
             if not content or not hdfs_path:
+                if progress_q is not None:
+                    progress_q.put(("tick", 1, 0, 0, 0, 0))
+                continue
+            try:
+                status = process_repo(repo_name, content, hdfs_path)
+                if progress_q is not None:
+                    if status == "skipped_hdfs":
+                        progress_q.put(("tick", 1, 0, 1, 0, 0))
+                    elif status == "skipped_local":
+                        progress_q.put(("tick", 1, 0, 0, 1, 0))
+                    else:
+                        progress_q.put(("tick", 1, 1, 0, 0, 0))
+            except Exception as exc:
+                if progress_q is not None:
+                    progress_q.put(("err", repo_name, repr(exc)))
+                    progress_q.put(("tick", 1, 0, 0, 0, 1))
+                else:
+                    raise
+
+    if args.repo_mp_workers and args.repo_mp_workers > 1:
+        # Multiprocessing mode: shard parquet part-* files across processes.
+        # Each process runs sequentially through its assigned parts, avoiding nested thread explosions.
+        if mp is None:  # pragma: no cover
+            raise MCPError("Multiprocessing is unavailable in this environment.")
+        mp_workers = int(args.repo_mp_workers)
+        if mp_workers < 1:
+            raise MCPError("--repo-mp-workers must be >= 1.")
+        if args.repo_workers and args.repo_workers > 1:
+            logger.warning(
+                "Both --repo-mp-workers and --repo-workers set; in mp mode repos are processed sequentially per process. "
+                "Set --repo-workers=1 to avoid nested threading."
+            )
+        shards: List[List[Path]] = [[] for _ in range(mp_workers)]
+        for idx, part in enumerate(part_files):
+            shards[idx % mp_workers].append(part)
+
+        start_methods = set(mp.get_all_start_methods()) if hasattr(mp, "get_all_start_methods") else set()
+        # Prefer fork on Linux for performance and to avoid pickling nested callables.
+        ctx = mp.get_context("fork") if "fork" in start_methods else mp.get_context("spawn")
+        progress_q = ctx.Queue(maxsize=max(1000, mp_workers * 10))
+        procs: List[Any] = []
+        shared_limit_counter = ctx.Value("i", 0) if max_repos is not None else None
+        shared_limit_lock = ctx.Lock() if max_repos is not None else None
+
+        def _proc_entry(parts: List[Path]) -> None:
+            try:
+                run_worker_stream(
+                    part_subset=parts,
+                    progress_q=progress_q,
+                    shared_limit_counter=shared_limit_counter,
+                    shared_limit_lock=shared_limit_lock,
+                )
+            finally:
+                progress_q.put(("done",))
+
+        for shard_parts in shards:
+            p = ctx.Process(target=_proc_entry, args=(shard_parts,))
+            p.start()
+            procs.append(p)
+
+        done = 0
+        while done < len(procs):
+            msg = progress_q.get()
+            if not msg:
+                continue
+            kind = msg[0]
+            if kind == "tick":
+                _, inc_processed, inc_generated, inc_skipped_hdfs, inc_skipped_local, inc_errors = msg
+                stats.processed += int(inc_processed)
+                stats.generated += int(inc_generated)
+                stats.skipped_by_hdfs += int(inc_skipped_hdfs)
+                stats.skipped_by_local += int(inc_skipped_local)
+                stats.errors += int(inc_errors)
+                if progress is not None:
+                    progress.update(int(inc_processed))
+                log_skip_stats()
+            elif kind == "err":
+                _, repo_name, err = msg
+                logger.error("Repository %s failed: %s", repo_name, err)
+                errors.append((str(repo_name), RuntimeError(str(err))))
+            elif kind == "done":
+                done += 1
+            else:
+                logger.debug("Unknown progress message: %s", msg)
+
+        for p in procs:
+            p.join()
+    else:
+        # Threaded mode (legacy).
+        with ThreadPoolExecutor(max_workers=repo_workers) as executor:
+            in_flight: Dict[Any, str] = {}
+            in_flight_started_at: Dict[Any, float] = {}
+            for row in _iter_parquet_rows_from_parts(
+                parquet_dir,
+                columns=["repo_name", "content", "hdfs_path", "error_message"],
+                batch_size=scan_batch_size,
+                part_files=part_files,
+            ):
+                if max_repos is not None and stats.processed >= max_repos:
+                    break
+                stats.processed += 1
                 if progress is not None:
                     progress.update(1)
-                continue
-
-            while len(in_flight) >= repo_workers:
-                try:
-                    future = next(as_completed(list(in_flight.keys()), timeout=30.0))
-                except TimeoutError:
-                    if not args.progress_only and in_flight_started_at:
-                        now = time.time()
-                        stuck = sorted(
-                            (
-                                (now - in_flight_started_at.get(f, now), in_flight.get(f, "<unknown>"))
-                                for f in in_flight
-                            ),
-                            reverse=True,
-                        )[:5]
-                        logger.warning(
-                            "No repo finished in 30s; oldest in-flight (seconds, repo): %s",
-                            ", ".join(f"{age:.0f}s {name}" for age, name in stuck),
-                        )
+                repo_name = str(row.get("repo_name") or "").strip()
+                if not should_process_repo(repo_name):
+                    continue
+                if row.get("error_message"):
+                    continue
+                content = str(row.get("content") or "")
+                hdfs_path = str(row.get("hdfs_path") or "").strip()
+                if not content or not hdfs_path:
                     continue
 
-                finished_repo = in_flight.pop(future)
-                in_flight_started_at.pop(future, None)
+                while len(in_flight) >= repo_workers:
+                    try:
+                        future = next(as_completed(list(in_flight.keys()), timeout=30.0))
+                    except TimeoutError:
+                        if not args.progress_only and in_flight_started_at:
+                            now = time.time()
+                            stuck = sorted(
+                                (
+                                    (now - in_flight_started_at.get(f, now), in_flight.get(f, "<unknown>"))
+                                    for f in in_flight
+                                ),
+                                reverse=True,
+                            )[:5]
+                            logger.warning(
+                                "No repo finished in 30s; oldest in-flight (seconds, repo): %s",
+                                ", ".join(f"{age:.0f}s {name}" for age, name in stuck),
+                            )
+                        continue
+
+                    finished_repo = in_flight.pop(future)
+                    in_flight_started_at.pop(future, None)
+                    try:
+                        future.result()
+                    except Exception as exc:
+                        logger.error("Repository %s failed: %s", finished_repo, exc)
+                        errors.append((finished_repo, exc))
+                    log_skip_stats()
+                    if progress is not None:
+                        # progress is driven by scan count, already updated per row.
+                        pass
+
+                def _thread_worker() -> None:
+                    status = process_repo(repo_name, content, hdfs_path)
+                    with counter_lock:
+                        if status == "skipped_hdfs":
+                            stats.skipped_by_hdfs += 1
+                        elif status == "skipped_local":
+                            stats.skipped_by_local += 1
+                        else:
+                            stats.generated += 1
+
+                future = executor.submit(_thread_worker)
+                in_flight[future] = repo_name
+                in_flight_started_at[future] = time.time()
+
+                if max_repos is not None and stats.processed >= max_repos:
+                    break
+
+            for future in as_completed(in_flight):
+                finished_repo = in_flight[future]
                 try:
                     future.result()
                 except Exception as exc:
                     logger.error("Repository %s failed: %s", finished_repo, exc)
                     errors.append((finished_repo, exc))
-                processed += 1
                 log_skip_stats()
-                if progress is not None:
-                    progress.update(1)
-
-            future = executor.submit(worker, repo_name, content, hdfs_path)
-            in_flight[future] = repo_name
-            in_flight_started_at[future] = time.time()
-
-            if max_repos is not None and processed + len(in_flight) >= max_repos:
-                break
-
-        for future in as_completed(in_flight):
-            finished_repo = in_flight[future]
-            try:
-                future.result()
-            except Exception as exc:
-                logger.error("Repository %s failed: %s", finished_repo, exc)
-                errors.append((finished_repo, exc))
-            processed += 1
-            log_skip_stats()
-            if progress is not None:
-                progress.update(1)
 
     if progress is not None:
         progress.close()
@@ -1681,6 +1828,16 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="Maximum number of repositories to process concurrently.",
     )
     parser.add_argument(
+        "--repo-mp-workers",
+        type=int,
+        default=None,
+        help=(
+            "Optional: enable multiprocessing for parquet streaming by sharding part-* files across processes. "
+            "Recommended on large CPU machines; avoids nested thread explosions. "
+            "In mp mode each process runs repos sequentially (set --repo-workers=1)."
+        ),
+    )
+    parser.add_argument(
         "--repo-batch-size",
         type=int,
         default=None,
@@ -1833,6 +1990,8 @@ def validate_args(args: argparse.Namespace, targets: Sequence[RepoTarget]) -> No
         raise MCPError("--section-workers must be >= 1 when provided.")
     if args.repo_workers is not None and args.repo_workers < 1:
         raise MCPError("--repo-workers must be >= 1 when provided.")
+    if args.repo_mp_workers is not None and args.repo_mp_workers < 1:
+        raise MCPError("--repo-mp-workers must be >= 1 when provided.")
     if args.repo_batch_size is not None and args.repo_batch_size < 1:
         raise MCPError("--repo-batch-size must be >= 1 when provided.")
     if args.hydration_timeout is not None and args.hydration_timeout <= 0:
@@ -1859,6 +2018,8 @@ def validate_args(args: argparse.Namespace, targets: Sequence[RepoTarget]) -> No
             raise MCPError("--parquet-max-repos must be >= 1 when provided.")
         if args.parquet_scan_batch_size is not None and args.parquet_scan_batch_size < 1:
             raise MCPError("--parquet-scan-batch-size must be >= 1 when provided.")
+    if args.repo_mp_workers and not args.parquet_input_dir:
+        raise MCPError("--repo-mp-workers is only supported with --parquet-input-dir.")
 
 
 def main(argv: Optional[List[str]] = None) -> None:

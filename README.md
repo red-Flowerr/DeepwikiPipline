@@ -68,48 +68,61 @@ python deepwiki_mcp_client.py \
 
 ## 批量运行示例
 
+
+"http://[2605:340:cd51:7700:5ae2:c8f3:778:a9d0]:8000/v1/chat/completions,http://[2605:340:cd51:7700:286a:3a59:f4f2:b989]:8000/v1/chat/completions,http://[2605:340:cd51:7700:3930:80b8:8d05:f633]:8000/v1/chat/completions,http://[2605:340:cd51:7700:77b0:be0f:674c:6fe0]:8000/v1/chat/completions,http://[2605:340:cd51:7700:13a8:94f8:597d:e509]:8000/v1/chat/completions,http://[2605:340:cd51:7700:3e72:4aa3:98c9:48e5]:8000/v1/chat/completions,http://[2605:340:cd51:7700:f233:7336:e8dd:6fbf]:8000/v1/chat/completions,http://[2605:340:cd51:7700:97c6:18fe:be8d:f5d]:8000/v1/chat/completions,http://[2605:340:cd51:7700:631d:5d4a:832f:5d27]:8000/v1/chat/completions,http://[2605:340:cd51:7700:98af:4a95:177c:10c4]:8000/v1/chat/completions,http://[2605:340:cd51:7700:256:e584:4eb6:f6ea]:8000/v1/chat/completions,http://[2605:340:cd51:7700:58d7:64bd:e047:d7a]:8000/v1/chat/completions"
+
 ```bash
-   
-
-
-
-
-
-
-
-
-http://[2605:340:cd51:7700:d2a0:3ebe:6ad2:ccb2]:8000/v1/chat/completions,http://[2605:340:cd51:7700:78c7:e555:ac89:5633]:8000/v1/chat/completions,http://[2605:340:cd51:7700:a3ee:7aef:e6a9:10de]:8000/v1/chat/completions,http://[2605:340:cd51:7700:1134:7cdb:9a9e:b6e0]:8000/v1/chat/completions,http://[2605:340:cd51:7700:192e:909d:3448:7e0a]:8000/v1/chat/completions,http://[2605:340:cd51:7700:a442:17d0:4bf:5108]:8000/v1/chat/completions,http://[2605:340:cd51:7700:6873:76a7:1507:fba]:8000/v1/chat/completions,http://[2605:340:cd51:7700:6873:76a7:1507:fba]:8000/v1/chat/completions,http://[2605:340:cd51:7700:ea6f:755d:6615:4dc2]:8000/v1/chat/completions,http://[2605:340:cd51:7700:b205:844b:c560:cc3e]:8000/v1/chat/completions,http://[2605:340:cd51:7700:ac40:6b9:4bac:e956]:8000/v1/chat/completions,http://[2605:340:cd51:7700:a442:17d0:4bf:5108]:8000/v1/chat/completions
-
-
-http://[2605:340:cd51:7700:e96f:4b63:978a:11e4]:8000/v1/chat/completions,http://[2605:340:cd51:7700:e9ff:7550:86b0:bd8c]:8000/v1/chat/completions,http://[2605:340:cd51:7700:f6e2:dcdb:d569:6fa9]:8000/v1/chat/completions,http://[2605:340:cd51:7700:3758:5cb8:16ec:aea7]:8000/v1/chat/completions,http://[2605:340:cd51:7700:246f:5e8a:a4b:b9a5]:8000/v1/chat/completions,http://[2605:340:cd51:7700:8c0e:31a0:2f3c:93b2]:8000/v1/chat/completions,http://[2605:340:cd51:7700:816e:914b:c9ce:3fc7]:8000/v1/chat/completions,http://[2605:340:cd51:7700:48cc:d0fa:7ee:97d0]:8000/v1/chat/completions,http://[2605:340:cd51:7700:3758:5cb8:16ec:aea7]:8000/v1/chat/completions,http://[2605:340:cd51:7700:227f:3813:5457:7b77]:8000/v1/chat/completions,http://[2605:340:cd51:7700:b7c8:169c:1130:8410]:8000/v1/chat/completions,http://[2605:340:cd51:7700:246f:5e8a:a4b:b9a5]:8000/v1/chat/completions,http://[2605:340:cd51:7700:97:75c4:63eb:7507]:8000/v1/chat/completions,http://[2605:340:cd51:7700:2787:ad8e:6f21:2ae5]:8000/v1/chat/completions,http://[2605:340:cd51:7700:1e37:a428:9cee:677a]:8000/v1/chat/completions,http://[2605:340:cd51:7700:83a:3e2e:9ccd:84fc]:8000/v1/chat/completions,http://[2605:340:cd51:7700:408b:5149:1030:1b93]:8000/v1/chat/completions,http://[2605:340:cd51:7700:808c:c5ef:17f6:ec10]:8000/v1/chat/completions,http://[2605:340:cd51:7700:44fd:a43c:4aaa:be7f]:8000/v1/chat/completions,http://[2605:340:cd51:7700:6542:ae4e:9544:90f7]:8000/v1/chat/completions,http://[2605:340:cd51:7700:48cc:d0fa:7ee:97d0]:8000/v1/chat/completions,http://[2605:340:cd51:7700:808c:c5ef:17f6:ec10]:8000/v1/chat/completions,http://[2605:340:cd51:7700:8dac:3019:cbae:7d61]:8000/v1/chat/completions,http://[2605:340:cd51:7700:83a:3e2e:9ccd:84fc]:8000/v1/chat/completions,http://[2605:340:cd51:7700:e9ff:7550:86b0:bd8c]:8000/v1/chat/completions,http://[2605:340:cd51:7700:daae:23b5:435f:5e38]:8000/v1/chat/completions,http://[2605:340:cd51:7700:816e:914b:c9ce:3fc7]:8000/v1/chat/completions,http://[2605:340:cd51:7700:44fd:a43c:4aaa:be7f]:8000/v1/chat/completions,http://[2605:340:cd51:7700:408b:5149:1030:1b93]:8000/v1/chat/completions,http://[2605:340:cd51:7700:b7c8:169c:1130:8410]:8000/v1/chat/completions,http://[2605:340:cd51:7700:6b11:3d28:f8b2:d047]:8000/v1/chat/completions,http://[2605:340:cd51:7700:1177:b349:28c3:3b84]:8000/v1/chat/completions
 
 python deepwiki_mcp_client.py \
    --parquet-all \
+   --parquet-input-dir /mnt/hdfs/userx/shanyong/code/code_wiki/deepwiki \
+   --parquet-scan-batch-size 128 \
+   --repo-mp-workers 1 \
+   --repo-workers 1 \
+   --max-workers 1 \
+   --section-workers 1 \
+   --repo-cache-dir /tmp/deepwiki_repo_cache \
+   --repo-cache-cleanup on-success \
+   --skip-existing \
    --narrative-output-dir result_data/batch_narratives \
    --narrative-format json \
    --narrative-modes code critic \
-   --parquet-input-dir /mnt/hdfs/userx/shanyong/code/code_wiki/deepwiki \
-   --repo-cache-dir /tmp/deepwiki_repo_cache \
    --design-use-vllm \
-   --design-vllm-retry-backoff 3 \
-   --design-vllm-server-urls "http://[2605:340:cd51:7700:d2a0:3ebe:6ad2:ccb2]:8000/v1/chat/completions,http://[2605:340:cd51:7700:78c7:e555:ac89:5633]:8000/v1/chat/completions,http://[2605:340:cd51:7700:a3ee:7aef:e6a9:10de]:8000/v1/chat/completions,http://[2605:340:cd51:7700:1134:7cdb:9a9e:b6e0]:8000/v1/chat/completions,http://[2605:340:cd51:7700:192e:909d:3448:7e0a]:8000/v1/chat/completions,http://[2605:340:cd51:7700:a442:17d0:4bf:5108]:8000/v1/chat/completions,http://[2605:340:cd51:7700:6873:76a7:1507:fba]:8000/v1/chat/completions,http://[2605:340:cd51:7700:6873:76a7:1507:fba]:8000/v1/chat/completions,http://[2605:340:cd51:7700:ea6f:755d:6615:4dc2]:8000/v1/chat/completions,http://[2605:340:cd51:7700:b205:844b:c560:cc3e]:8000/v1/chat/completions,http://[2605:340:cd51:7700:ac40:6b9:4bac:e956]:8000/v1/chat/completions,http://[2605:340:cd51:7700:a442:17d0:4bf:5108]:8000/v1/chat/completions,http://[2605:340:cd51:7700:e96f:4b63:978a:11e4]:8000/v1/chat/completions,http://[2605:340:cd51:7700:e9ff:7550:86b0:bd8c]:8000/v1/chat/completions,http://[2605:340:cd51:7700:f6e2:dcdb:d569:6fa9]:8000/v1/chat/completions,http://[2605:340:cd51:7700:3758:5cb8:16ec:aea7]:8000/v1/chat/completions,http://[2605:340:cd51:7700:246f:5e8a:a4b:b9a5]:8000/v1/chat/completions,http://[2605:340:cd51:7700:8c0e:31a0:2f3c:93b2]:8000/v1/chat/completions,http://[2605:340:cd51:7700:816e:914b:c9ce:3fc7]:8000/v1/chat/completions,http://[2605:340:cd51:7700:48cc:d0fa:7ee:97d0]:8000/v1/chat/completions,http://[2605:340:cd51:7700:3758:5cb8:16ec:aea7]:8000/v1/chat/completions,http://[2605:340:cd51:7700:227f:3813:5457:7b77]:8000/v1/chat/completions,http://[2605:340:cd51:7700:b7c8:169c:1130:8410]:8000/v1/chat/completions,http://[2605:340:cd51:7700:246f:5e8a:a4b:b9a5]:8000/v1/chat/completions,http://[2605:340:cd51:7700:97:75c4:63eb:7507]:8000/v1/chat/completions,http://[2605:340:cd51:7700:2787:ad8e:6f21:2ae5]:8000/v1/chat/completions,http://[2605:340:cd51:7700:1e37:a428:9cee:677a]:8000/v1/chat/completions,http://[2605:340:cd51:7700:83a:3e2e:9ccd:84fc]:8000/v1/chat/completions,http://[2605:340:cd51:7700:408b:5149:1030:1b93]:8000/v1/chat/completions,http://[2605:340:cd51:7700:808c:c5ef:17f6:ec10]:8000/v1/chat/completions,http://[2605:340:cd51:7700:44fd:a43c:4aaa:be7f]:8000/v1/chat/completions,http://[2605:340:cd51:7700:6542:ae4e:9544:90f7]:8000/v1/chat/completions,http://[2605:340:cd51:7700:48cc:d0fa:7ee:97d0]:8000/v1/chat/completions,http://[2605:340:cd51:7700:808c:c5ef:17f6:ec10]:8000/v1/chat/completions,http://[2605:340:cd51:7700:8dac:3019:cbae:7d61]:8000/v1/chat/completions,http://[2605:340:cd51:7700:83a:3e2e:9ccd:84fc]:8000/v1/chat/completions,http://[2605:340:cd51:7700:e9ff:7550:86b0:bd8c]:8000/v1/chat/completions,http://[2605:340:cd51:7700:daae:23b5:435f:5e38]:8000/v1/chat/completions,http://[2605:340:cd51:7700:816e:914b:c9ce:3fc7]:8000/v1/chat/completions,http://[2605:340:cd51:7700:44fd:a43c:4aaa:be7f]:8000/v1/chat/completions,http://[2605:340:cd51:7700:408b:5149:1030:1b93]:8000/v1/chat/completions,http://[2605:340:cd51:7700:b7c8:169c:1130:8410]:8000/v1/chat/completions,http://[2605:340:cd51:7700:6b11:3d28:f8b2:d047]:8000/v1/chat/completions,http://[2605:340:cd51:7700:1177:b349:28c3:3b84]:8000/v1/chat/completions" \
+   --design-vllm-server-urls  \
    --design-vllm-model gpt-oss-120b \
    --design-vllm-temperature 0.7 \
    --judge-use-llm \
-   --judge-vllm-server-urls "http://[2605:340:cd51:7700:d2a0:3ebe:6ad2:ccb2]:8000/v1/chat/completions,http://[2605:340:cd51:7700:78c7:e555:ac89:5633]:8000/v1/chat/completions,http://[2605:340:cd51:7700:a3ee:7aef:e6a9:10de]:8000/v1/chat/completions,http://[2605:340:cd51:7700:1134:7cdb:9a9e:b6e0]:8000/v1/chat/completions,http://[2605:340:cd51:7700:192e:909d:3448:7e0a]:8000/v1/chat/completions,http://[2605:340:cd51:7700:a442:17d0:4bf:5108]:8000/v1/chat/completions,http://[2605:340:cd51:7700:6873:76a7:1507:fba]:8000/v1/chat/completions,http://[2605:340:cd51:7700:6873:76a7:1507:fba]:8000/v1/chat/completions,http://[2605:340:cd51:7700:ea6f:755d:6615:4dc2]:8000/v1/chat/completions,http://[2605:340:cd51:7700:b205:844b:c560:cc3e]:8000/v1/chat/completions,http://[2605:340:cd51:7700:ac40:6b9:4bac:e956]:8000/v1/chat/completions,http://[2605:340:cd51:7700:a442:17d0:4bf:5108]:8000/v1/chat/completions,http://[2605:340:cd51:7700:e96f:4b63:978a:11e4]:8000/v1/chat/completions,http://[2605:340:cd51:7700:e9ff:7550:86b0:bd8c]:8000/v1/chat/completions,http://[2605:340:cd51:7700:f6e2:dcdb:d569:6fa9]:8000/v1/chat/completions,http://[2605:340:cd51:7700:3758:5cb8:16ec:aea7]:8000/v1/chat/completions,http://[2605:340:cd51:7700:246f:5e8a:a4b:b9a5]:8000/v1/chat/completions,http://[2605:340:cd51:7700:8c0e:31a0:2f3c:93b2]:8000/v1/chat/completions,http://[2605:340:cd51:7700:816e:914b:c9ce:3fc7]:8000/v1/chat/completions,http://[2605:340:cd51:7700:48cc:d0fa:7ee:97d0]:8000/v1/chat/completions,http://[2605:340:cd51:7700:3758:5cb8:16ec:aea7]:8000/v1/chat/completions,http://[2605:340:cd51:7700:227f:3813:5457:7b77]:8000/v1/chat/completions,http://[2605:340:cd51:7700:b7c8:169c:1130:8410]:8000/v1/chat/completions,http://[2605:340:cd51:7700:246f:5e8a:a4b:b9a5]:8000/v1/chat/completions,http://[2605:340:cd51:7700:97:75c4:63eb:7507]:8000/v1/chat/completions,http://[2605:340:cd51:7700:2787:ad8e:6f21:2ae5]:8000/v1/chat/completions,http://[2605:340:cd51:7700:1e37:a428:9cee:677a]:8000/v1/chat/completions,http://[2605:340:cd51:7700:83a:3e2e:9ccd:84fc]:8000/v1/chat/completions,http://[2605:340:cd51:7700:408b:5149:1030:1b93]:8000/v1/chat/completions,http://[2605:340:cd51:7700:808c:c5ef:17f6:ec10]:8000/v1/chat/completions,http://[2605:340:cd51:7700:44fd:a43c:4aaa:be7f]:8000/v1/chat/completions,http://[2605:340:cd51:7700:6542:ae4e:9544:90f7]:8000/v1/chat/completions,http://[2605:340:cd51:7700:48cc:d0fa:7ee:97d0]:8000/v1/chat/completions,http://[2605:340:cd51:7700:808c:c5ef:17f6:ec10]:8000/v1/chat/completions,http://[2605:340:cd51:7700:8dac:3019:cbae:7d61]:8000/v1/chat/completions,http://[2605:340:cd51:7700:83a:3e2e:9ccd:84fc]:8000/v1/chat/completions,http://[2605:340:cd51:7700:e9ff:7550:86b0:bd8c]:8000/v1/chat/completions,http://[2605:340:cd51:7700:daae:23b5:435f:5e38]:8000/v1/chat/completions,http://[2605:340:cd51:7700:816e:914b:c9ce:3fc7]:8000/v1/chat/completions,http://[2605:340:cd51:7700:44fd:a43c:4aaa:be7f]:8000/v1/chat/completions,http://[2605:340:cd51:7700:408b:5149:1030:1b93]:8000/v1/chat/completions,http://[2605:340:cd51:7700:b7c8:169c:1130:8410]:8000/v1/chat/completions,http://[2605:340:cd51:7700:6b11:3d28:f8b2:d047]:8000/v1/chat/completions,http://[2605:340:cd51:7700:1177:b349:28c3:3b84]:8000/v1/chat/completions" \
+   --judge-vllm-server-urls "http://[2605:340:cd51:7700:48a3:70f4:7d3c:a57]:8000/v1/chat/completions,http://[2605:340:cd51:7700:3dbc:b7c3:dd35:8009]:8000/v1/chat/completions,http://[2605:340:cd51:7700:48a3:70f4:7d3c:a57]:8000/v1/chat/completions,http://[2605:340:cd51:7700:ed84:8d30:c89c:ca0a]:8000/v1/chat/completions,http://[2605:340:cd51:7700:ed84:8d30:c89c:ca0a]:8000/v1/chat/completions,http://[2605:340:cd51:7700:8978:4517:4283:273a]:8000/v1/chat/completions,http://[2605:340:cd51:7700:eb97:8e80:414c:c3f5]:8000/v1/chat/completions,http://[2605:340:cd51:7700:eb97:8e80:414c:c3f5]:8000/v1/chat/completions,http://[2605:340:cd51:7700:3dbc:b7c3:dd35:8009]:8000/v1/chat/completions,http://[2605:340:cd51:7700:cc59:6632:c1ae:8f1e]:8000/v1/chat/completions,http://[2605:340:cd51:7700:56f1:b739:c035:c85]:8000/v1/chat/completions,http://[2605:340:cd51:7700:b19d:b7c:f434:1f1c]:8000/v1/chat/completions" \
    --judge-vllm-model gpt-oss-120b \
-   --judge-vllm-max-tokens 512 \
    --judge-vllm-temperature 0.2 \
    --judge-max-rounds 1 \
-   --parquet-scan-batch-size 128 \
-   --repo-workers 128 \
-   --max-workers 32 \
-   --section-workers 32 \
-   --repo-cache-cleanup on-success \
+   --continue-on-error \
    --hdfs-output-dir "hdfs://harunawl/home/byte_data_seed_wl/user/xingtianshun/deepwiki_data" \
-   --skip-existing \
-   --log-level DEBUG
+   --log-level INFO
+
+
+python deepwiki_mcp_client.py \
+   --parquet-all \
+   --parquet-input-dir /mnt/hdfs/userx/shanyong/code/code_wiki/deepwiki \
+   --parquet-scan-batch-size 128 \
+   --repo-mp-workers 96 \
+   --repo-workers 1 \
+   --max-workers 4 \
+   --section-workers 4 \
+   --repo-cache-dir /tmp/deepwiki_repo_cache \
+   --repo-cache-cleanup on-success \
+   --narrative-output-dir result_data/batch_narratives \
+   --narrative-format json \
+   --narrative-modes code critic \
+   --design-use-vllm \
+   --design-vllm-server-urls "http://[2605:340:cd51:7700:5ae2:c8f3:778:a9d0]:8000/v1/chat/completions,http://[2605:340:cd51:7700:286a:3a59:f4f2:b989]:8000/v1/chat/completions,http://[2605:340:cd51:7700:3930:80b8:8d05:f633]:8000/v1/chat/completions,http://[2605:340:cd51:7700:77b0:be0f:674c:6fe0]:8000/v1/chat/completions,http://[2605:340:cd51:7700:13a8:94f8:597d:e509]:8000/v1/chat/completions,http://[2605:340:cd51:7700:3e72:4aa3:98c9:48e5]:8000/v1/chat/completions,http://[2605:340:cd51:7700:f233:7336:e8dd:6fbf]:8000/v1/chat/completions,http://[2605:340:cd51:7700:97c6:18fe:be8d:f5d]:8000/v1/chat/completions,http://[2605:340:cd51:7700:631d:5d4a:832f:5d27]:8000/v1/chat/completions,http://[2605:340:cd51:7700:98af:4a95:177c:10c4]:8000/v1/chat/completions,http://[2605:340:cd51:7700:256:e584:4eb6:f6ea]:8000/v1/chat/completions,http://[2605:340:cd51:7700:58d7:64bd:e047:d7a]:8000/v1/chat/completions" \
+   --design-vllm-model gpt-oss-120b \
+   --design-vllm-temperature 0.7 \
+   --continue-on-error \
+   --hdfs-output-dir "hdfs://harunawl/home/byte_data_seed_wl/user/xingtianshun/deepwiki_data" \
+   --log-level INFO
 ```
+--skip-existing \
 说明：当同时设置 `--skip-existing` 和 `--hdfs-output-dir` 时，会优先检查 HDFS 上是否已存在该 repo 对应的输出子目录；若目录已存在则直接跳过该 repo 的生成与上传（实现上会先对 `--hdfs-output-dir` 做一次非递归索引，避免每个 repo 都频繁调用 HDFS 命令）。
 
 说明：当使用 server pooling（`--*-vllm-server-urls`）时，会对 endpoints 做去重；请求侧使用 round-robin（每次请求轮换起始 endpoint）来让所有节点参与分摊，并对连接/超时等瞬态失败的节点做短暂冷却剔除，避免持续打到坏节点；`--*-vllm-retries/--*-vllm-retry-backoff/--*-vllm-timeout` 也会应用到 pooling 调用路径。
@@ -140,7 +153,7 @@ python token_count_local.py \
   --add-special-tokens
 
 python utils/vllm_load_test.py \
-   --urls "http://[2605:340:cd51:7700:cd6d:b7d4:77a1:d61e]:8000/v1/chat/completions" \
+   --urls "http://[2605:340:cd51:7700:cd6d:b7d4:77a1:d61e]]:8000/v1/chat/completions" \
    --model gpt-oss-120b \
    --prompt "Summarize: hello world." \
    --max-tokens 131072 \
@@ -148,3 +161,21 @@ python utils/vllm_load_test.py \
    --warmup 5 \
    --requests 50 \
    --concurrency 16
+
+python utils/multipro_repo_zip_token.py \
+   --parquet-base /mnt/hdfs/userx/shanyong/code/code_wiki/deepwiki \
+   --workers 128 --mp-start spawn \
+   --retries 1 --retry-base-sleep 1 --retry-max-sleep 2 \
+   --results-jsonl /tmp/repo_zip_token_results.jsonl \
+   --failures-jsonl /tmp/new_repo_zip_token_failures.jsonl
+
+python utils/multipro_parquet_token.py \
+   --base /mnt/hdfs/userx/shanyong/code/code_wiki/deepwiki \
+   --column content \
+   --workers 128 \
+   --mp-start spawn
+find /mnt/hdfs/user_wl/xingtianshun/deepwiki_data -maxdepth 1 -type f -printf '%T@\n' \
+| sort -n \
+| awk 'NR==1{min=$1} END{print "跨度(s):", $1-min}'
+# 30min 200repo
+# 1h 400repo
