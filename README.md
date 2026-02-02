@@ -169,9 +169,18 @@ python utils/export_narratives_to_parquet.py \
    --output /mnt/hdfs/user_wl/xingtianshun/deepwiki_handover/4w_wiki_repo_level_narratives_12B.parquet \
    --workers 16 --mp-start spawn
 
+python utils/add_narrative_tokens_to_parquet.py \
+   --input /mnt/hdfs/user_wl/xingtianshun/deepwiki_handover/4w_wiki_repo_level_narratives_12B.parquet \
+   --output /mnt/hdfs/user_wl/xingtianshun/deepwiki_handover/4w_wiki_repo_level_narratives_12B.with_tokens.parquet \
+   --tokenizer-backend tiktoken --encoding cl100k_base
+
 folder：deepwiki_data 下的子目录名
 filepath：文件的完整路径
 repo：reponame
 narrative：repo-level的一整条数据(将section用\n\n拼接)
 rows：当前repo的section个数
 missing_rows：拼接时被跳过的条数
+
+python utils/export_repo_tokens_jsonl.py \
+   --input /mnt/hdfs/user_wl/xingtianshun/deepwiki_handover/4w_wiki_repo_level_narratives_12B.with_tokens.parquet \
+   --output repo_narrative_tokens.jsonl
