@@ -65,7 +65,9 @@ python deepwiki_mcp_client.py \
    --continue-on-error \
    --hdfs-output-dir "hdfs://harunawl/home/byte_data_seed_wl/user/xingtianshun/deepwiki_data" \
    --skip-existing \
-   --log-level INFO
+   --log-level INFO \
+   --shard-count 5 \
+   --shard-index 0
 ```
 
 # 提取数据

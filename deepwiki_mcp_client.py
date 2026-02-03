@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -701,6 +702,15 @@ def _run_parquet_stream(
             return False
         if prefix and not repo_name.startswith(prefix):
             return False
+        shard_count = getattr(args, "shard_count", 1) or 1
+        shard_index = getattr(args, "shard_index", 0) or 0
+        if shard_count < 1 or shard_index < 0 or shard_index >= shard_count:
+            raise MCPError("--shard-count must be >= 1 and --shard-index must be in [0, shard-count).")
+        if shard_count > 1:
+            h = hashlib.md5(repo_name.encode("utf-8")).hexdigest()
+            bucket = int(h[:8], 16) % shard_count
+            if bucket != shard_index:
+                return False
         return True
 
     def process_repo(repo_name: str, content: str, hdfs_path: str) -> str:
@@ -1949,6 +1959,18 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Suppress all log output so only the repository progress bar remains.",
     )
+    parser.add_argument(
+        "--shard-count",
+        type=int,
+        default=1,
+        help="Deterministically shard parquet-discovered repos into N buckets (default: 1).",
+    )
+    parser.add_argument(
+        "--shard-index",
+        type=int,
+        default=0,
+        help="Shard bucket index for this worker in [0, shard-count) (default: 0).",
+    )
     return parser.parse_args(argv)
 
 
@@ -2020,6 +2042,13 @@ def validate_args(args: argparse.Namespace, targets: Sequence[RepoTarget]) -> No
             raise MCPError("--parquet-scan-batch-size must be >= 1 when provided.")
     if args.repo_mp_workers and not args.parquet_input_dir:
         raise MCPError("--repo-mp-workers is only supported with --parquet-input-dir.")
+    if args.shard_count is not None and args.shard_count < 1:
+        raise MCPError("--shard-count must be >= 1.")
+    if args.shard_index is not None and args.shard_index < 0:
+        raise MCPError("--shard-index must be >= 0.")
+    if args.shard_count is not None and args.shard_index is not None:
+        if args.shard_index >= args.shard_count:
+            raise MCPError("--shard-index must be in [0, shard-count).")
 
 
 def main(argv: Optional[List[str]] = None) -> None:
