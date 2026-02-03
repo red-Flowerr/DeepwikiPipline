@@ -675,7 +675,38 @@ def _run_parquet_stream(
     if repo_workers < 1:
         raise MCPError("--repo-workers must be >= 1.")
 
-    total = max_repos if max_repos is not None else _parquet_total_rows(parquet_dir)
+    def _repo_in_shard(repo_name: str) -> bool:
+        shard_count = getattr(args, "shard_count", 1) or 1
+        shard_index = getattr(args, "shard_index", 0) or 0
+        if shard_count <= 1:
+            return True
+        h = hashlib.md5(repo_name.encode("utf-8")).hexdigest()
+        bucket = int(h[:8], 16) % shard_count
+        return bucket == shard_index
+
+    shard_progress_total = bool(getattr(args, "shard_progress_total", False))
+    if max_repos is not None:
+        total = max_repos
+    else:
+        if shard_progress_total and (getattr(args, "shard_count", 1) or 1) > 1:
+            # Compute per-shard total by scanning repo_name only.
+            try:
+                import pyarrow.parquet as pq  # type: ignore[import-not-found]
+            except ImportError as exc:  # pragma: no cover
+                raise MCPError(
+                    "pyarrow is required for shard progress total. Install it with `pip install pyarrow`."
+                ) from exc
+            total = 0
+            for part in sorted(path for path in parquet_dir.iterdir() if path.is_file() and path.name.startswith("part-")):
+                parquet_file = pq.ParquetFile(part)
+                for record_batch in parquet_file.iter_batches(batch_size=2048, columns=["repo_name"]):
+                    repos = record_batch.column(0).to_pylist()
+                    for repo_name in repos:
+                        if _repo_in_shard(str(repo_name or "").strip()):
+                            total += 1
+        else:
+            total = _parquet_total_rows(parquet_dir)
+
     progress = tqdm(total=total, desc="Repositories", unit="repo", leave=True) if tqdm else None
 
     stats = _ParquetStreamStats()
@@ -706,11 +737,8 @@ def _run_parquet_stream(
         shard_index = getattr(args, "shard_index", 0) or 0
         if shard_count < 1 or shard_index < 0 or shard_index >= shard_count:
             raise MCPError("--shard-count must be >= 1 and --shard-index must be in [0, shard-count).")
-        if shard_count > 1:
-            h = hashlib.md5(repo_name.encode("utf-8")).hexdigest()
-            bucket = int(h[:8], 16) % shard_count
-            if bucket != shard_index:
-                return False
+        if shard_count > 1 and not _repo_in_shard(repo_name):
+            return False
         return True
 
     def process_repo(repo_name: str, content: str, hdfs_path: str) -> str:
@@ -778,20 +806,14 @@ def _run_parquet_stream(
                         break
                     shared_limit_counter.value += 1
             repo_name = str(row.get("repo_name") or "").strip()
-            # Each row contributes 1 progress tick regardless of skip/generate.
+            # Only shard-eligible rows contribute to the shard-aware progress bar.
             if not should_process_repo(repo_name):
-                if progress_q is not None:
-                    progress_q.put(("tick", 1, 0, 0, 0, 0))
                 continue
             if row.get("error_message"):
-                if progress_q is not None:
-                    progress_q.put(("tick", 1, 0, 0, 0, 0))
                 continue
             content = str(row.get("content") or "")
             hdfs_path = str(row.get("hdfs_path") or "").strip()
             if not content or not hdfs_path:
-                if progress_q is not None:
-                    progress_q.put(("tick", 1, 0, 0, 0, 0))
                 continue
             try:
                 status = process_repo(repo_name, content, hdfs_path)
@@ -890,12 +912,12 @@ def _run_parquet_stream(
             ):
                 if max_repos is not None and stats.processed >= max_repos:
                     break
-                stats.processed += 1
-                if progress is not None:
-                    progress.update(1)
                 repo_name = str(row.get("repo_name") or "").strip()
                 if not should_process_repo(repo_name):
                     continue
+                stats.processed += 1
+                if progress is not None:
+                    progress.update(1)
                 if row.get("error_message"):
                     continue
                 content = str(row.get("content") or "")
@@ -1971,6 +1993,14 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         default=0,
         help="Shard bucket index for this worker in [0, shard-count) (default: 0).",
     )
+    parser.add_argument(
+        "--shard-progress-total",
+        action="store_true",
+        help=(
+            "When sharding parquet discovery, compute per-shard total for the progress bar "
+            "(requires scanning parquet repo_name once; slower startup)."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -2049,6 +2079,8 @@ def validate_args(args: argparse.Namespace, targets: Sequence[RepoTarget]) -> No
     if args.shard_count is not None and args.shard_index is not None:
         if args.shard_index >= args.shard_count:
             raise MCPError("--shard-index must be in [0, shard-count).")
+    if getattr(args, "shard_progress_total", False) and (args.shard_count or 1) <= 1:
+        raise MCPError("--shard-progress-total requires --shard-count > 1.")
 
 
 def main(argv: Optional[List[str]] = None) -> None:

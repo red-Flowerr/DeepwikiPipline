@@ -67,7 +67,8 @@ python deepwiki_mcp_client.py \
    --skip-existing \
    --log-level INFO \
    --shard-count 5 \
-   --shard-index 0
+   --shard-index 0 \
+   --shard-progress-total
 ```
 
 # 提取数据
@@ -124,18 +125,18 @@ python utils/multipro_raw_token.py \
 
 
 python utils/ipv6_to_urls.py <<'EOF'
-2605:340:cd51:7700:2398:bba5:7251:9a79
-2605:340:cd51:7700:2dbb:7c35:26c9:bf7c
-2605:340:cd51:7700:b7a:fd01:3787:7c89
-2605:340:cd51:7700:eae3:c02a:fa98:af77
-2605:340:cd51:7700:5fdc:9a08:e20a:7bfe
-2605:340:cd51:7700:c532:8755:d45b:1067
-2605:340:cd51:7700:fc3a:b90:519c:44a3
-2605:340:cd51:7700:1796:e44f:d18c:7194
-2605:340:cd51:7700:105:9f99:39dd:363a
-2605:340:cd51:7700:65ee:2dfa:ca7a:a0c1
-2605:340:cd51:7700:1286:adb6:1ec6:3dc9
-2605:340:cd51:7700:6db7:7ec3:d7c3:c3d3
+2605:340:cd51:a01:5f43:589a:ed6c:4350
+2605:340:cd51:a01:62c0:d74d:4ef0:6395
+2605:340:cd51:a01:b38:948e:3058:f42
+2605:340:cd51:a01:3b59:db13:a33c:e393
+2605:340:cd51:a01:433f:7fd3:362e:5530
+2605:340:cd51:a00:d29f:75b9:847:a2a4
+2605:340:cd51:a01:31b0:3ee8:9d41:1657
+2605:340:cd51:a01:f7cf:d02c:c6e2:fe
+2605:340:cd51:a01:f4a1:ff3f:8bc0:3949
+2605:340:cd51:a01:671a:2c7:7e5:d596
+2605:340:cd51:a01:525f:1773:a2fa:f0ac
+2605:340:cd51:a01:4fe0:2414:99db:22b8
 EOF
 
 
