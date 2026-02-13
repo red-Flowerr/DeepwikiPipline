@@ -242,6 +242,7 @@ class ShardWriter:
         compression: str = "zstd",
         rows_per_shard: int = 0,
         batch_size: int = 256,
+        start_shard_idx: int = 0,
     ):
         self.output_path = output_path
         self.schema = schema
@@ -249,7 +250,7 @@ class ShardWriter:
         self.rows_per_shard = rows_per_shard
         self.batch_size = batch_size
 
-        self._shard_idx = 0
+        self._shard_idx = start_shard_idx
         self._rows_in_shard = 0
         self._total_rows = 0
         self._buffer: list[dict] = []
@@ -390,6 +391,16 @@ def main() -> None:
             "0 = single file (legacy). (default: %(default)s)"
         ),
     )
+    ap.add_argument(
+        "--resume",
+        action="store_true",
+        default=False,
+        help=(
+            "Resume from previous run. Scans existing shard files, collects already-processed "
+            "folders, and skips them. New shards are appended with incrementing part numbers. "
+            "Only works with shard mode (--rows-per-shard > 0)."
+        ),
+    )
     args = ap.parse_args()
 
     if args.tokenizer_backend == "hf" and not args.hf_model:
@@ -407,12 +418,59 @@ def main() -> None:
         ]
     )
 
+    # ------------------------------------------------------------------
+    # Resume: scan existing shards for already-processed folders
+    # ------------------------------------------------------------------
+    done_folders: set[str] = set()
+    resume_shard_idx = 0
+
+    if args.resume and args.rows_per_shard > 0:
+        output_dir = os.path.dirname(args.output) or "."
+        output_stem = os.path.splitext(os.path.basename(args.output))[0]
+        output_ext = os.path.splitext(args.output)[1] or ".parquet"
+
+        import glob as _glob
+
+        existing = sorted(_glob.glob(
+            os.path.join(output_dir, f"{output_stem}.part*{output_ext}")
+        ))
+        if existing:
+            print(f"[resume] Found {len(existing)} existing shard(s), scanning ...", file=sys.stderr, flush=True)
+            for shard_path in existing:
+                try:
+                    t = pq.read_table(shard_path, columns=["folder"])
+                    folders = t.column("folder").to_pylist()
+                    done_folders.update(folders)
+                except Exception as e:
+                    # Incomplete shard (no footer) — delete it
+                    print(
+                        f"[resume] Removing incomplete shard: {shard_path} ({e!r})",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    os.remove(shard_path)
+                    continue
+                # Extract shard index from filename
+                fname = os.path.basename(shard_path)
+                try:
+                    idx = int(fname.replace(output_stem + ".part", "").replace(output_ext, ""))
+                    resume_shard_idx = max(resume_shard_idx, idx + 1)
+                except ValueError:
+                    pass
+            print(
+                f"[resume] {len(done_folders):,} folders already done, "
+                f"new shards start at part{resume_shard_idx:04d}",
+                file=sys.stderr,
+                flush=True,
+            )
+
     shard_writer = ShardWriter(
         output_path=args.output,
         schema=schema,
         compression="zstd",
         rows_per_shard=args.rows_per_shard,
         batch_size=args.batch_size,
+        start_shard_idx=resume_shard_idx,
     )
 
     # ------------------------------------------------------------------
@@ -446,11 +504,21 @@ def main() -> None:
 
     print(f"Scanning {args.base} for *_narratives.json ...", file=sys.stderr, flush=True)
     all_tasks = []
+    skipped = 0
     for t in iter_narratives_json_files(args.base):
+        if done_folders and t.folder in done_folders:
+            skipped += 1
+            continue
         all_tasks.append(t)
         if args.max_files and len(all_tasks) >= args.max_files:
             break
     total_files_enqueued = len(all_tasks)
+    if skipped:
+        print(
+            f"[resume] Skipped {skipped:,} already-done files, {total_files_enqueued:,} remaining.",
+            file=sys.stderr,
+            flush=True,
+        )
 
     print(
         f"Spawning {workers} workers for {total_files_enqueued:,} files ...",
