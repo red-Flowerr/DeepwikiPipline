@@ -135,6 +135,14 @@ def parse_one_file(filepath: str, concat_sep: str):
     return repo, narrative_text, len(obj), missing
 
 
+class _TaskTimeout(Exception):
+    pass
+
+
+def _timeout_handler(signum, frame):
+    raise _TaskTimeout("task timed out")
+
+
 def worker(
     task_q,
     out_q,
@@ -144,7 +152,10 @@ def worker(
     hf_model: str,
     hf_trust_remote_code: bool,
     hf_local_files_only: bool,
+    task_timeout: int = 0,
 ):
+    import signal
+
     count_tokens = make_token_counter(
         tokenizer_backend=tokenizer_backend,
         tiktoken_encoding=encoding,
@@ -153,6 +164,10 @@ def worker(
         hf_local_files_only=hf_local_files_only,
     )
 
+    use_alarm = task_timeout > 0 and hasattr(signal, "SIGALRM")
+    if use_alarm:
+        signal.signal(signal.SIGALRM, _timeout_handler)
+
     while True:
         task = task_q.get()
         if task is None:
@@ -160,8 +175,15 @@ def worker(
             break
 
         try:
+            if use_alarm:
+                signal.alarm(task_timeout)
+
             repo, narrative_text, total, missing = parse_one_file(task.filepath, concat_sep=concat_sep)
             narrative_tokens = count_tokens(narrative_text)
+
+            if use_alarm:
+                signal.alarm(0)  # cancel alarm
+
             out_q.put(
                 (
                     "ok",
@@ -176,7 +198,11 @@ def worker(
                     },
                 )
             )
+        except _TaskTimeout:
+            out_q.put(("err", {"folder": task.folder, "filepath": task.filepath, "error": f"timeout ({task_timeout}s)"}))
         except Exception as e:
+            if use_alarm:
+                signal.alarm(0)
             out_q.put(("err", {"folder": task.folder, "filepath": task.filepath, "error": repr(e)}))
         finally:
             task_q.task_done()
@@ -212,6 +238,12 @@ def main() -> None:
     ap.add_argument("--hf-trust-remote-code", action="store_true")
     ap.add_argument("--hf-local-files-only", action="store_true", default=True)
     ap.add_argument("--hf-allow-download", action="store_false", dest="hf_local_files_only")
+    ap.add_argument(
+        "--task-timeout",
+        type=int,
+        default=120,
+        help="Per-task timeout in seconds (0 = disabled). If a single file takes longer, it is skipped. (default: %(default)s)",
+    )
     args = ap.parse_args()
 
     if args.tokenizer_backend == "hf" and not args.hf_model:
@@ -265,6 +297,7 @@ def main() -> None:
                 args.hf_model,
                 args.hf_trust_remote_code,
                 args.hf_local_files_only,
+                args.task_timeout,
             ),
         )
         p.start()
