@@ -218,11 +218,125 @@ def flush_rows(writer: pq.ParquetWriter, rows: list[dict]):
     rows.clear()
 
 
+# ---------------------------------------------------------------------------
+# Shard writer: produces sequentially numbered, *complete* Parquet files.
+# Each shard is a self-contained Parquet file with a proper footer.
+# If the process is killed mid-run, only the last (unfinished) shard is lost.
+# ---------------------------------------------------------------------------
+
+class ShardWriter:
+    """Write rows into sequentially numbered Parquet shards.
+
+    Each shard is closed (footer written) when it reaches *rows_per_shard*
+    rows, so even if the process is killed mid-run, all completed shards
+    are valid Parquet files.
+
+    When *rows_per_shard* is 0, behaves like a single-file writer (legacy
+    mode) but still supports graceful close.
+    """
+
+    def __init__(
+        self,
+        output_path: str,
+        schema: pa.Schema,
+        compression: str = "zstd",
+        rows_per_shard: int = 0,
+        batch_size: int = 256,
+    ):
+        self.output_path = output_path
+        self.schema = schema
+        self.compression = compression
+        self.rows_per_shard = rows_per_shard
+        self.batch_size = batch_size
+
+        self._shard_idx = 0
+        self._rows_in_shard = 0
+        self._total_rows = 0
+        self._buffer: list[dict] = []
+        self._writer: pq.ParquetWriter | None = None
+
+        self._output_dir = os.path.dirname(output_path) or "."
+        self._output_stem = os.path.splitext(os.path.basename(output_path))[0]
+        self._output_ext = os.path.splitext(output_path)[1] or ".parquet"
+
+        os.makedirs(self._output_dir, exist_ok=True)
+
+        if rows_per_shard <= 0:
+            # Single-file mode
+            self._writer = pq.ParquetWriter(output_path, schema=schema, compression=compression)
+
+    def _shard_path(self) -> str:
+        return os.path.join(
+            self._output_dir,
+            f"{self._output_stem}.part{self._shard_idx:04d}{self._output_ext}",
+        )
+
+    def _ensure_writer(self):
+        if self._writer is None:
+            self._writer = pq.ParquetWriter(
+                self._shard_path(), schema=self.schema, compression=self.compression,
+            )
+
+    def _flush_buffer(self):
+        if not self._buffer:
+            return
+        self._ensure_writer()
+        table = pa.Table.from_pylist(self._buffer, schema=self.schema)
+        self._writer.write_table(table)
+        self._rows_in_shard += len(self._buffer)
+        self._total_rows += len(self._buffer)
+        self._buffer.clear()
+
+    def _rotate_if_needed(self):
+        if self.rows_per_shard <= 0:
+            return
+        if self._rows_in_shard >= self.rows_per_shard:
+            self._close_current_shard()
+            self._shard_idx += 1
+            self._rows_in_shard = 0
+
+    def _close_current_shard(self):
+        if self._writer is not None:
+            self._writer.close()
+            self._writer = None
+
+    def add(self, row: dict):
+        self._buffer.append(row)
+        if len(self._buffer) >= self.batch_size:
+            self._flush_buffer()
+            self._rotate_if_needed()
+
+    def close(self):
+        self._flush_buffer()
+        self._close_current_shard()
+
+    @property
+    def total_rows(self) -> int:
+        return self._total_rows + len(self._buffer)
+
+    @property
+    def shard_count(self) -> int:
+        if self.rows_per_shard <= 0:
+            return 1
+        return self._shard_idx + (1 if self._rows_in_shard > 0 or self._buffer else 0)
+
+    def output_files(self) -> list[str]:
+        if self.rows_per_shard <= 0:
+            return [self.output_path]
+        return [
+            os.path.join(
+                self._output_dir,
+                f"{self._output_stem}.part{i:04d}{self._output_ext}",
+            )
+            for i in range(self.shard_count)
+        ]
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(
         description=(
             "Extract each *_narratives.json under base/*/, concatenate each item's 'narrative' field, "
-            "and write one row per file into a single Parquet."
+            "and write one row per file into a single Parquet (or multiple shards)."
         )
     )
     ap.add_argument("--base", default=DEFAULT_BASE, help="Base directory (default: %(default)s)")
@@ -244,6 +358,16 @@ def main() -> None:
         default=120,
         help="Per-task timeout in seconds (0 = disabled). If a single file takes longer, it is skipped. (default: %(default)s)",
     )
+    ap.add_argument(
+        "--rows-per-shard",
+        type=int,
+        default=10000,
+        help=(
+            "Max rows per output Parquet shard. Each shard is a complete Parquet file, "
+            "so killing the process only loses the last incomplete shard. "
+            "0 = single file (legacy). (default: %(default)s)"
+        ),
+    )
     args = ap.parse_args()
 
     if args.tokenizer_backend == "hf" and not args.hf_model:
@@ -261,8 +385,36 @@ def main() -> None:
         ]
     )
 
-    os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
-    writer = pq.ParquetWriter(args.output, schema=schema, compression="zstd")
+    shard_writer = ShardWriter(
+        output_path=args.output,
+        schema=schema,
+        compression="zstd",
+        rows_per_shard=args.rows_per_shard,
+        batch_size=args.batch_size,
+    )
+
+    # ------------------------------------------------------------------
+    # Graceful shutdown: Ctrl+C or kill → close writer before exit
+    # ------------------------------------------------------------------
+    _shutdown_requested = False
+
+    def _graceful_shutdown(signum, frame):
+        nonlocal _shutdown_requested
+        if _shutdown_requested:
+            # Second signal → force exit
+            print("\nForced exit.", file=sys.stderr, flush=True)
+            sys.exit(1)
+        _shutdown_requested = True
+        sig_name = "SIGINT" if signum == 2 else f"signal {signum}"
+        print(
+            f"\n[{sig_name}] Graceful shutdown: flushing buffer and closing shards ...",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    import signal as _signal
+    _signal.signal(_signal.SIGINT, _graceful_shutdown)
+    _signal.signal(_signal.SIGTERM, _graceful_shutdown)
 
     ctx = mp.get_context(args.mp_start) if hasattr(mp, "get_context") else mp
     task_q = ctx.JoinableQueue()
@@ -271,7 +423,6 @@ def main() -> None:
     workers = max(1, int(args.workers))
 
     print(f"Scanning {args.base} for *_narratives.json ...", file=sys.stderr, flush=True)
-    # Collect tasks first so we know the total before spawning workers
     all_tasks = []
     for t in iter_narratives_json_files(args.base):
         all_tasks.append(t)
@@ -284,6 +435,13 @@ def main() -> None:
         file=sys.stderr,
         flush=True,
     )
+    if args.rows_per_shard > 0:
+        print(
+            f"Shard mode: {args.rows_per_shard:,} rows per shard",
+            file=sys.stderr,
+            flush=True,
+        )
+
     procs = []
     for _ in range(workers):
         p = ctx.Process(
@@ -305,14 +463,13 @@ def main() -> None:
 
     for t in all_tasks:
         task_q.put(t)
-    del all_tasks  # free memory
+    del all_tasks
     for _ in range(workers):
         task_q.put(None)
 
     ok = 0
     err = 0
     workers_done = 0
-    buffer: list[dict] = []
 
     pbar = tqdm(
         total=total_files_enqueued,
@@ -322,7 +479,7 @@ def main() -> None:
         disable=False,
     )
     try:
-        while workers_done < workers:
+        while workers_done < workers and not _shutdown_requested:
             try:
                 kind, payload = out_q.get(timeout=5)
             except Exception:
@@ -338,31 +495,39 @@ def main() -> None:
                 continue
             if kind == "ok":
                 ok += 1
-                buffer.append(payload)
-                if len(buffer) >= args.batch_size:
-                    flush_rows(writer, buffer)
+                shard_writer.add(payload)
                 pbar.update(1)
-                pbar.set_postfix(ok=ok, err=err)
+                pbar.set_postfix(ok=ok, err=err, shards=shard_writer.shard_count)
             elif kind == "err":
                 err += 1
-                # still write error row? keep errors separate; user can inspect stderr
                 print(f"\nERROR {payload.get('filepath')}: {payload.get('error')}", file=sys.stderr)
                 pbar.update(1)
-                pbar.set_postfix(ok=ok, err=err)
+                pbar.set_postfix(ok=ok, err=err, shards=shard_writer.shard_count)
     finally:
         pbar.close()
-        task_q.join()
-        flush_rows(writer, buffer)
-        writer.close()
+        # Always close the shard writer so completed data is not lost
+        shard_writer.close()
+        # Kill remaining workers quickly if shutting down early
+        if _shutdown_requested:
+            for p in procs:
+                if p.is_alive():
+                    p.terminate()
         for p in procs:
             p.join(timeout=10)
 
-    print("\nDONE")
+    interrupted = " (interrupted)" if _shutdown_requested else ""
+    print(f"\nDONE{interrupted}")
     print("base:", args.base)
-    print("output:", args.output)
+    if args.rows_per_shard > 0:
+        print("output_shards:", shard_writer.shard_count)
+        for fp in shard_writer.output_files():
+            print(f"  {fp}")
+    else:
+        print("output:", args.output)
     print("files_total:", total_files_enqueued)
     print("files_ok:", ok)
     print("files_err:", err)
+    print("rows_written:", shard_writer.total_rows)
 
 
 if __name__ == "__main__":

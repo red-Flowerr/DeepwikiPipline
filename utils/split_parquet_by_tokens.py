@@ -85,9 +85,19 @@ def main() -> None:
         print(f"  [{lo:>10,}, {hi_label:>10})  ->  {name}")
 
     # ------------------------------------------------------------------
-    # Read input
+    # Read input (supports single .parquet or directory of shards)
     # ------------------------------------------------------------------
-    table = pq.read_table(args.input)
+    input_path = args.input
+    if os.path.isdir(input_path):
+        import pyarrow.dataset as ds
+
+        dataset = ds.dataset(input_path, format="parquet")
+        table = dataset.to_table()
+        print(f"\nInput (dir): {input_path}  ({table.num_rows:,} rows from {len(dataset.files)} files)")
+    else:
+        table = pq.read_table(input_path)
+        print(f"\nInput: {input_path}  ({table.num_rows:,} rows)")
+
     if args.tokens_col not in table.column_names:
         raise SystemExit(
             f"Column {args.tokens_col!r} not found. "
@@ -95,7 +105,6 @@ def main() -> None:
         )
 
     total_rows = table.num_rows
-    print(f"\nInput: {args.input}  ({total_rows:,} rows)")
 
     tokens = table.column(args.tokens_col)
 
