@@ -277,14 +277,36 @@ class ShardWriter:
                 self._shard_path(), schema=self.schema, compression=self.compression,
             )
 
+    def _write_rows(self, rows: list[dict]):
+        """Write a list of rows, auto-splitting on ArrowCapacityError (>2GB chunk)."""
+        if not rows:
+            return
+        try:
+            table = pa.Table.from_pylist(rows, schema=self.schema)
+            self._writer.write_table(table)
+        except (pa.lib.ArrowCapacityError, pa.lib.ArrowInvalid):
+            if len(rows) <= 1:
+                # Single row > 2GB — skip it and warn
+                print(
+                    f"\nWARNING: skipping 1 row that exceeds 2GB Arrow limit "
+                    f"(folder={rows[0].get('folder', '?')})",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return
+            # Split in half and retry
+            mid = len(rows) // 2
+            self._write_rows(rows[:mid])
+            self._write_rows(rows[mid:])
+            return
+        self._rows_in_shard += len(rows)
+        self._total_rows += len(rows)
+
     def _flush_buffer(self):
         if not self._buffer:
             return
         self._ensure_writer()
-        table = pa.Table.from_pylist(self._buffer, schema=self.schema)
-        self._writer.write_table(table)
-        self._rows_in_shard += len(self._buffer)
-        self._total_rows += len(self._buffer)
+        self._write_rows(self._buffer)
         self._buffer.clear()
 
     def _rotate_if_needed(self):
