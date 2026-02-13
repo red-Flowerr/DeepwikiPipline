@@ -75,6 +75,8 @@ def make_token_counter(
 
 
 def iter_narratives_json_files(base_dir: str):
+    dirs_scanned = 0
+    files_found = 0
     with os.scandir(base_dir) as it:
         for ent in it:
             if not ent.is_dir():
@@ -82,12 +84,26 @@ def iter_narratives_json_files(base_dir: str):
             if ent.name.startswith("."):
                 continue
             folder = ent.name
+            dirs_scanned += 1
+            if dirs_scanned % 5000 == 0:
+                print(
+                    f"  [scan] {dirs_scanned:,} dirs scanned, "
+                    f"{files_found:,} narrative files found ...",
+                    file=sys.stderr,
+                    flush=True,
+                )
             with os.scandir(ent.path) as it2:
                 for f in it2:
                     if not f.is_file():
                         continue
                     if f.name.endswith("_narratives.json"):
+                        files_found += 1
                         yield Task(folder=folder, filepath=f.path)
+    print(
+        f"  [scan] done: {dirs_scanned:,} dirs, {files_found:,} narrative files.",
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 def parse_one_file(filepath: str, concat_sep: str):
@@ -221,6 +237,21 @@ def main() -> None:
     out_q = ctx.Queue(maxsize=2000)
 
     workers = max(1, int(args.workers))
+
+    print(f"Scanning {args.base} for *_narratives.json ...", file=sys.stderr, flush=True)
+    # Collect tasks first so we know the total before spawning workers
+    all_tasks = []
+    for t in iter_narratives_json_files(args.base):
+        all_tasks.append(t)
+        if args.max_files and len(all_tasks) >= args.max_files:
+            break
+    total_files_enqueued = len(all_tasks)
+
+    print(
+        f"Spawning {workers} workers for {total_files_enqueued:,} files ...",
+        file=sys.stderr,
+        flush=True,
+    )
     procs = []
     for _ in range(workers):
         p = ctx.Process(
@@ -239,12 +270,9 @@ def main() -> None:
         p.start()
         procs.append(p)
 
-    total_files_enqueued = 0
-    for t in iter_narratives_json_files(args.base):
+    for t in all_tasks:
         task_q.put(t)
-        total_files_enqueued += 1
-        if args.max_files and total_files_enqueued >= args.max_files:
-            break
+    del all_tasks  # free memory
     for _ in range(workers):
         task_q.put(None)
 
@@ -258,7 +286,7 @@ def main() -> None:
         desc="Exporting narratives",
         unit="file",
         dynamic_ncols=True,
-        disable=not sys.stderr.isatty(),
+        disable=False,
     )
     try:
         while workers_done < workers:
