@@ -3,7 +3,6 @@ import multiprocessing as mp
 import os
 import sys
 import tempfile
-import threading
 import time
 from dataclasses import dataclass
 
@@ -17,6 +16,8 @@ DEFAULT_WORKERS = 8
 # For huge narratives, keep Arrow batches small to avoid GB-sized tables.
 DEFAULT_BATCH_SIZE = 8
 DEFAULT_ROWS_PER_SHARD = 5000
+
+_STOP_REQUESTED = False
 
 
 @dataclass(frozen=True)
@@ -53,12 +54,12 @@ def _json_load(path: str):
             return json.load(f)
 
 
-def iter_narratives_json_files(base_dir: str, stop_event: threading.Event | None = None):
+def iter_narratives_json_files(base_dir: str):
     dirs_scanned = 0
     files_found = 0
     with os.scandir(base_dir) as it:
         for ent in it:
-            if stop_event is not None and stop_event.is_set():
+            if _STOP_REQUESTED:
                 break
             if not ent.is_dir():
                 continue
@@ -74,7 +75,7 @@ def iter_narratives_json_files(base_dir: str, stop_event: threading.Event | None
                 )
             with os.scandir(ent.path) as it2:
                 for f in it2:
-                    if stop_event is not None and stop_event.is_set():
+                    if _STOP_REQUESTED:
                         break
                     if not f.is_file():
                         continue
@@ -122,13 +123,12 @@ def prescan_tasks_to_jsonl(
     done_filepaths: set[str],
     max_files: int,
     out_jsonl_path: str,
-    stop_event: threading.Event | None = None,
 ) -> tuple[int, int]:
     enqueued = 0
     skipped = 0
     with open(out_jsonl_path, "w", encoding="utf-8") as f:
-        for t in iter_narratives_json_files(base_dir, stop_event=stop_event):
-            if stop_event is not None and stop_event.is_set():
+        for t in iter_narratives_json_files(base_dir):
+            if _STOP_REQUESTED:
                 break
             if done_filepaths and t.filepath in done_filepaths:
                 skipped += 1
@@ -157,6 +157,7 @@ class ShardWriter:
         rows_per_shard: int = 0,
         batch_size: int = 8,
         start_shard_idx: int = 0,
+        create_output_dir: bool = True,
     ):
         self.output_path = output_path
         self.schema = schema
@@ -173,7 +174,8 @@ class ShardWriter:
         self._output_dir = os.path.dirname(output_path) or "."
         self._output_stem = os.path.splitext(os.path.basename(output_path))[0]
         self._output_ext = os.path.splitext(output_path)[1] or ".parquet"
-        os.makedirs(self._output_dir, exist_ok=True)
+        if create_output_dir:
+            os.makedirs(self._output_dir, exist_ok=True)
 
     def _shard_path(self) -> str:
         return os.path.join(
@@ -193,9 +195,10 @@ class ShardWriter:
         if not self._buffer:
             return
         self._ensure_writer()
+        n = len(self._buffer)
         flush_rows(self._writer, self._buffer, self.schema)
-        self._rows_in_shard += len(self._buffer)
-        self._total_rows += len(self._buffer)
+        self._rows_in_shard += n
+        self._total_rows += n
         self._buffer.clear()
 
     def _rotate_if_needed(self):
@@ -272,7 +275,10 @@ def worker(
         rows_per_shard=rows_per_shard,
         batch_size=batch_size,
         start_shard_idx=start_shard_idx,
+        create_output_dir=False,
     )
+    # Signal readiness so the parent can detect forkserver/spawn startup issues.
+    out_q.put(("w_ready", {"worker_id": worker_id, "pid": os.getpid()}))
 
     while True:
         task = task_q.get()
@@ -321,6 +327,18 @@ def main() -> None:
     ap.add_argument("--mp-start", default="forkserver", choices=["spawn", "fork", "forkserver"])
     ap.add_argument("--rows-per-shard", type=int, default=DEFAULT_ROWS_PER_SHARD)
     ap.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
+    ap.add_argument(
+        "--queue-maxsize",
+        type=int,
+        default=0,
+        help="Task queue maxsize (0 = unbounded). Unbounded is recommended for large prescans.",
+    )
+    ap.add_argument(
+        "--shutdown-grace",
+        type=int,
+        default=30,
+        help="Seconds to wait for workers to finish after SIGINT/SIGTERM before terminating them.",
+    )
     ap.add_argument("--task-timeout", type=int, default=0, help="Per-file timeout seconds (0 disables).")
     ap.add_argument("--max-files", type=int, default=0)
     ap.add_argument("--resume", action="store_true", default=False)
@@ -362,13 +380,9 @@ def main() -> None:
                     pass
             print(f"[resume] {len(done_filepaths):,} files already done.", file=sys.stderr, flush=True)
 
-    stop_event = threading.Event()
-    shutdown_requested = False
-
     def _on_signal(signum, frame):
-        nonlocal shutdown_requested
-        shutdown_requested = True
-        stop_event.set()
+        global _STOP_REQUESTED
+        _STOP_REQUESTED = True
         print(f"\n[signal {signum}] graceful shutdown (pid={os.getpid()}) ...", file=sys.stderr, flush=True)
 
     import signal as _signal
@@ -385,25 +399,37 @@ def main() -> None:
         done_filepaths=done_filepaths,
         max_files=int(args.max_files),
         out_jsonl_path=task_list_path,
-        stop_event=stop_event,
     )
     if skipped:
         print(f"[resume] Skipped {skipped:,} already-done file(s).", file=sys.stderr, flush=True)
     print(f"Scan complete: {total:,} file(s) queued.", file=sys.stderr, flush=True)
-    if shutdown_requested:
+    if _STOP_REQUESTED:
         try:
             os.remove(task_list_path)
         except OSError:
             pass
         return
 
+    if args.mp_start == "forkserver" and hasattr(mp, "set_forkserver_preload"):
+        # Import-heavy modules can make worker startup look like a "hang" under spawn/forkserver.
+        # Preloading them once in the forkserver process makes worker start much faster.
+        try:
+            mp.set_forkserver_preload(["pyarrow", "pyarrow.parquet"])
+        except Exception:
+            pass
+
     ctx = mp.get_context(args.mp_start) if hasattr(mp, "get_context") else mp
     workers = max(1, int(args.workers))
-    task_q = ctx.Queue(maxsize=max(256, workers * 8))
+    qmax = int(args.queue_maxsize)
+    task_q = ctx.Queue(maxsize=qmax)
     out_q = ctx.Queue(maxsize=2000)
 
     print(f"Spawning {workers} workers ... (mp-start={args.mp_start})", file=sys.stderr, flush=True)
     print(f"Shard mode: {args.rows_per_shard:,} rows per shard", file=sys.stderr, flush=True)
+
+    # Create output directory once in the parent (avoid stampeding os.makedirs on remote FS).
+    out_dir = os.path.dirname(args.output) or "."
+    os.makedirs(out_dir, exist_ok=True)
 
     procs = []
     for wid in range(workers):
@@ -424,13 +450,45 @@ def main() -> None:
         p.start()
         procs.append(p)
 
+    # Wait for workers to be ready before enqueuing (helps diagnose "hang after spawn").
+    ready = 0
+    ready_deadline = time.time() + 120
+    last_ready_log = 0.0
+    while ready < workers and not _STOP_REQUESTED and time.time() < ready_deadline:
+        try:
+            kind, payload = out_q.get(timeout=2)
+        except Exception:
+            now = time.time()
+            if now - last_ready_log >= 10:
+                print(f"Waiting for workers to start: {ready}/{workers} ready ...", file=sys.stderr, flush=True)
+                last_ready_log = now
+            continue
+        if kind == "w_ready":
+            ready += 1
+            continue
+        # Buffer other messages until the main consume loop.
+        out_q.put((kind, payload))
+    if ready < workers:
+        dead = [p for p in procs if p.exitcode not in (None, 0)]
+        print(
+            f"[warn] Only {ready}/{workers} workers reported ready within 120s. "
+            f"dead_exitcodes={[p.exitcode for p in dead]}",
+            file=sys.stderr,
+            flush=True,
+        )
+
     # Enqueue tasks
+    print("Enqueuing tasks ...", file=sys.stderr, flush=True)
+    enq = 0
     with open(task_list_path, "r", encoding="utf-8") as f:
         for line in f:
-            if shutdown_requested:
+            if _STOP_REQUESTED:
                 break
             folder, filepath = line.rstrip("\n").split("\t", 1)
             task_q.put(Task(folder=folder, filepath=filepath))
+            enq += 1
+            if enq % 20000 == 0:
+                print(f"  [enqueue] {enq:,}/{total:,} queued ...", file=sys.stderr, flush=True)
     for _ in range(workers):
         task_q.put(None)
 
@@ -439,8 +497,13 @@ def main() -> None:
     workers_done = 0
     rows_written = 0
     pbar = tqdm(total=total, desc="Exporting narratives", unit="file", dynamic_ncols=True, disable=False)
+    shutdown_grace_deadline = None
     try:
-        while workers_done < workers and not shutdown_requested:
+        while workers_done < workers:
+            if _STOP_REQUESTED and shutdown_grace_deadline is None:
+                shutdown_grace_deadline = time.time() + int(args.shutdown_grace)
+            if shutdown_grace_deadline is not None and time.time() > shutdown_grace_deadline:
+                break
             try:
                 kind, payload = out_q.get(timeout=5)
             except Exception:
@@ -467,7 +530,7 @@ def main() -> None:
                 pbar.set_postfix(ok=ok, err=err)
     finally:
         pbar.close()
-        if shutdown_requested:
+        if _STOP_REQUESTED and workers_done < workers:
             for p in procs:
                 if p.is_alive():
                     p.terminate()
@@ -478,7 +541,7 @@ def main() -> None:
         except OSError:
             pass
 
-    interrupted = " (interrupted)" if shutdown_requested else ""
+    interrupted = " (interrupted)" if _STOP_REQUESTED else ""
     print(f"\nDONE{interrupted}")
     print("base:", args.base)
     print("output_pattern:", os.path.join(os.path.dirname(args.output) or ".", f"{os.path.splitext(os.path.basename(args.output))[0]}.worker*.part*{os.path.splitext(args.output)[1] or '.parquet'}"))
@@ -490,4 +553,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
