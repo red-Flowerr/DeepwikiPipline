@@ -25,6 +25,20 @@ class Task:
     filepath: str
 
 
+def make_schema() -> pa.Schema:
+    return pa.schema(
+        [
+            ("folder", pa.string()),
+            ("filepath", pa.string()),
+            ("repo", pa.string()),
+            ("narrative", pa.large_string()),
+            ("narrative_tokens", pa.int64()),
+            ("rows", pa.int32()),
+            ("missing_rows", pa.int32()),
+        ]
+    )
+
+
 def make_token_counter(
     tokenizer_backend: str,
     tiktoken_encoding: str,
@@ -77,11 +91,13 @@ def make_token_counter(
     raise ValueError(f"unknown tokenizer backend: {tokenizer_backend}")
 
 
-def iter_narratives_json_files(base_dir: str):
+def iter_narratives_json_files(base_dir: str, _stop_event: threading.Event | None = None):
     dirs_scanned = 0
     files_found = 0
     with os.scandir(base_dir) as it:
         for ent in it:
+            if _stop_event is not None and _stop_event.is_set():
+                break
             if not ent.is_dir():
                 continue
             if ent.name.startswith("."):
@@ -97,6 +113,8 @@ def iter_narratives_json_files(base_dir: str):
                 )
             with os.scandir(ent.path) as it2:
                 for f in it2:
+                    if _stop_event is not None and _stop_event.is_set():
+                        break
                     if not f.is_file():
                         continue
                     if f.name.endswith("_narratives.json"):
@@ -144,12 +162,15 @@ def prescan_tasks_to_jsonl(
     done_filepaths: set[str],
     max_files: int,
     out_jsonl_path: str,
+    stop_event: threading.Event | None = None,
 ) -> tuple[int, int]:
     """Scan base_dir and write tasks as JSONL. Returns (enqueued, skipped)."""
     enqueued = 0
     skipped = 0
     with open(out_jsonl_path, "w", encoding="utf-8") as f:
-        for t in iter_narratives_json_files(base_dir):
+        for t in iter_narratives_json_files(base_dir, _stop_event=stop_event):
+            if stop_event is not None and stop_event.is_set():
+                break
             if done_filepaths and t.filepath in done_filepaths:
                 skipped += 1
                 continue
@@ -168,6 +189,21 @@ def _timeout_handler(signum, frame):
     raise _TaskTimeout("task timed out")
 
 
+def _worker_output_path(base_output: str, worker_id: int) -> str:
+    output_dir = os.path.dirname(base_output) or "."
+    output_stem = os.path.splitext(os.path.basename(base_output))[0]
+    output_ext = os.path.splitext(base_output)[1] or ".parquet"
+    return os.path.join(output_dir, f"{output_stem}.worker{worker_id:03d}{output_ext}")
+
+
+def _worker_output_glob_pattern(base_output: str) -> str:
+    output_dir = os.path.dirname(base_output) or "."
+    output_stem = os.path.splitext(os.path.basename(base_output))[0]
+    output_ext = os.path.splitext(base_output)[1] or ".parquet"
+    # ShardWriter turns "{stem}.worker000.parquet" into "{stem}.worker000.part0000.parquet"
+    return os.path.join(output_dir, f"{output_stem}.worker*.part*{output_ext}")
+
+
 def worker(
     task_q,
     out_q,
@@ -178,20 +214,49 @@ def worker(
     hf_trust_remote_code: bool,
     hf_local_files_only: bool,
     task_timeout: int = 0,
+    no_token_count: bool = False,
+    write_mode: str = "worker",
+    output_path: str = "",
+    rows_per_shard: int = 0,
+    batch_size: int = 256,
+    worker_id: int = 0,
+    start_shard_idx: int = 0,
 ):
     import signal
 
-    count_tokens = make_token_counter(
-        tokenizer_backend=tokenizer_backend,
-        tiktoken_encoding=encoding,
-        hf_model=hf_model,
-        hf_trust_remote_code=hf_trust_remote_code,
-        hf_local_files_only=hf_local_files_only,
-    )
+    # With --mp-start=fork the parent signal handlers are inherited.
+    # Ignore SIGINT in workers so only the parent coordinates shutdown.
+    try:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+    except Exception:
+        pass
+
+    count_tokens = None
+    if not no_token_count:
+        count_tokens = make_token_counter(
+            tokenizer_backend=tokenizer_backend,
+            tiktoken_encoding=encoding,
+            hf_model=hf_model,
+            hf_trust_remote_code=hf_trust_remote_code,
+            hf_local_files_only=hf_local_files_only,
+        )
 
     use_alarm = task_timeout > 0 and hasattr(signal, "SIGALRM")
     if use_alarm:
         signal.signal(signal.SIGALRM, _timeout_handler)
+
+    shard_writer: ShardWriter | None = None
+    if write_mode == "worker":
+        if not output_path:
+            raise ValueError("worker mode requires output_path")
+        shard_writer = ShardWriter(
+            output_path=output_path,
+            schema=make_schema(),
+            compression="zstd",
+            rows_per_shard=rows_per_shard,
+            batch_size=batch_size,
+            start_shard_idx=start_shard_idx,
+        )
 
     while True:
         task = task_q.get()
@@ -203,25 +268,27 @@ def worker(
                 signal.alarm(task_timeout)
 
             repo, narrative_text, total, missing = parse_one_file(task.filepath, concat_sep=concat_sep)
-            narrative_tokens = count_tokens(narrative_text)
+            narrative_tokens = -1 if no_token_count else int(count_tokens(narrative_text))  # type: ignore[misc]
 
             if use_alarm:
                 signal.alarm(0)  # cancel alarm
 
-            out_q.put(
-                (
-                    "ok",
-                    {
-                        "folder": task.folder,
-                        "filepath": task.filepath,
-                        "repo": repo,
-                        "narrative": narrative_text,
-                        "narrative_tokens": int(narrative_tokens),
-                        "rows": total,
-                        "missing_rows": missing,
-                    },
-                )
-            )
+            row = {
+                "folder": task.folder,
+                "filepath": task.filepath,
+                "repo": repo,
+                "narrative": narrative_text,
+                "narrative_tokens": narrative_tokens,
+                "rows": total,
+                "missing_rows": missing,
+            }
+            if write_mode == "worker":
+                assert shard_writer is not None
+                shard_writer.add(row)
+                # Only send small payloads to the parent to avoid IPC bottlenecks.
+                out_q.put(("ok", {"filepath": task.filepath}))
+            else:
+                out_q.put(("ok", row))
         except _TaskTimeout:
             out_q.put(("err", {"folder": task.folder, "filepath": task.filepath, "error": f"timeout ({task_timeout}s)"}))
         except Exception as e:
@@ -233,7 +300,21 @@ def worker(
                 # Ensure a timeout doesn't leak into subsequent tasks.
                 signal.alarm(0)
 
-    out_q.put(("w_done", None))
+    if shard_writer is not None:
+        shard_writer.close()
+        out_q.put(
+            (
+                "w_done",
+                {
+                    "worker_id": worker_id,
+                    "rows_written": shard_writer.total_rows,
+                    "shards": shard_writer.shard_count,
+                    "output_files": shard_writer.output_files(),
+                },
+            )
+        )
+    else:
+        out_q.put(("w_done", {"worker_id": worker_id}))
 
 
 def flush_rows(writer: pq.ParquetWriter, rows: list[dict]):
@@ -406,7 +487,24 @@ def main() -> None:
             "(default: %(default)s)"
         ),
     )
+    ap.add_argument(
+        "--write-mode",
+        default="worker",
+        choices=["worker", "main"],
+        help=(
+            "How to write Parquet. "
+            "'worker' lets each worker write its own Parquet shards (fastest; avoids huge IPC for long narratives). "
+            "'main' sends rows to the parent process to write (legacy; can be slow for large narratives). "
+            "(default: %(default)s)"
+        ),
+    )
     ap.add_argument("--tokenizer-backend", default="tiktoken", choices=["tiktoken", "hf"])
+    ap.add_argument(
+        "--no-token-count",
+        action="store_true",
+        default=False,
+        help="Skip token counting (writes narrative_tokens=-1). Useful for very large narratives.",
+    )
     ap.add_argument("--encoding", default=DEFAULT_ENCODING, help="tiktoken encoding name (default: %(default)s)")
     ap.add_argument("--hf-model", default="", help="HF model name/path (required when --tokenizer-backend=hf)")
     ap.add_argument("--hf-trust-remote-code", action="store_true")
@@ -440,26 +538,17 @@ def main() -> None:
     )
     args = ap.parse_args()
 
-    if args.tokenizer_backend == "hf" and not args.hf_model:
+    if (not args.no_token_count) and args.tokenizer_backend == "hf" and not args.hf_model:
         raise SystemExit("--hf-model is required when --tokenizer-backend=hf")
 
-    schema = pa.schema(
-        [
-            ("folder", pa.string()),
-            ("filepath", pa.string()),
-            ("repo", pa.string()),
-            ("narrative", pa.large_string()),
-            ("narrative_tokens", pa.int64()),
-            ("rows", pa.int32()),
-            ("missing_rows", pa.int32()),
-        ]
-    )
+    schema = make_schema()
 
     # ------------------------------------------------------------------
     # Resume: scan existing shards for already-processed folders
     # ------------------------------------------------------------------
     done_filepaths: set[str] = set()
-    resume_shard_idx = 0
+    resume_shard_idx = 0  # main mode
+    resume_worker_shard_idx: dict[int, int] = {}  # worker mode: worker_id -> next shard idx
 
     if args.resume and args.rows_per_shard > 0:
         output_dir = os.path.dirname(args.output) or "."
@@ -468,9 +557,11 @@ def main() -> None:
 
         import glob as _glob
 
-        existing = sorted(_glob.glob(
-            os.path.join(output_dir, f"{output_stem}.part*{output_ext}")
-        ))
+        if args.write_mode == "worker":
+            pattern = os.path.join(output_dir, f"{output_stem}.worker*.part*{output_ext}")
+        else:
+            pattern = os.path.join(output_dir, f"{output_stem}.part*{output_ext}")
+        existing = sorted(_glob.glob(pattern))
         if existing:
             print(f"[resume] Found {len(existing)} existing shard(s), scanning ...", file=sys.stderr, flush=True)
             for shard_path in existing:
@@ -488,44 +579,70 @@ def main() -> None:
                     )
                     os.remove(shard_path)
                     continue
-                # Extract shard index from filename
                 fname = os.path.basename(shard_path)
-                try:
-                    idx = int(fname.replace(output_stem + ".part", "").replace(output_ext, ""))
-                    resume_shard_idx = max(resume_shard_idx, idx + 1)
-                except ValueError:
-                    pass
+                if args.write_mode == "worker":
+                    # Expected: {stem}.worker{wid}.part{idx}{ext}
+                    # Example: out.worker000.part0003.parquet
+                    try:
+                        mid = fname.split(".worker", 1)[1]
+                        wid_s, rest = mid.split(".part", 1)
+                        idx_s = rest.rsplit(output_ext, 1)[0]
+                        wid = int(wid_s)
+                        idx = int(idx_s)
+                        resume_worker_shard_idx[wid] = max(resume_worker_shard_idx.get(wid, 0), idx + 1)
+                    except Exception:
+                        pass
+                else:
+                    # Expected: {stem}.part{idx}{ext}
+                    try:
+                        idx = int(fname.replace(output_stem + ".part", "").replace(output_ext, ""))
+                        resume_shard_idx = max(resume_shard_idx, idx + 1)
+                    except ValueError:
+                        pass
             print(
                 f"[resume] {len(done_filepaths):,} files already done, "
-                f"new shards start at part{resume_shard_idx:04d}",
+                + (
+                    "new shards continue per-worker"
+                    if args.write_mode == "worker"
+                    else f"new shards start at part{resume_shard_idx:04d}"
+                ),
                 file=sys.stderr,
                 flush=True,
             )
 
-    shard_writer = ShardWriter(
-        output_path=args.output,
-        schema=schema,
-        compression="zstd",
-        rows_per_shard=args.rows_per_shard,
-        batch_size=args.batch_size,
-        start_shard_idx=resume_shard_idx,
-    )
+    shard_writer: ShardWriter | None = None
+    if args.write_mode == "main":
+        shard_writer = ShardWriter(
+            output_path=args.output,
+            schema=schema,
+            compression="zstd",
+            rows_per_shard=args.rows_per_shard,
+            batch_size=args.batch_size,
+            start_shard_idx=resume_shard_idx,
+        )
 
     # ------------------------------------------------------------------
     # Graceful shutdown: Ctrl+C or kill → close writer before exit
     # ------------------------------------------------------------------
     _shutdown_requested = False
+    _scan_stop = threading.Event()
 
     def _graceful_shutdown(signum, frame):
         nonlocal _shutdown_requested
         if _shutdown_requested:
-            # Second signal → force exit
-            print("\nForced exit.", file=sys.stderr, flush=True)
-            sys.exit(1)
+            # Some environments may deliver repeated SIGINT/SIGTERM. Don't hard-exit:
+            # keep trying to flush/close so finished shards stay valid.
+            print(
+                f"\n[signal {signum}] Shutdown already in progress (pid={os.getpid()}).",
+                file=sys.stderr,
+                flush=True,
+            )
+            return
         _shutdown_requested = True
+        _scan_stop.set()
         sig_name = "SIGINT" if signum == 2 else f"signal {signum}"
         print(
-            f"\n[{sig_name}] Graceful shutdown: flushing buffer and closing shards ...",
+            f"\n[{sig_name}] Graceful shutdown: flushing buffer and closing shards (pid={os.getpid()}) ...",
             file=sys.stderr,
             flush=True,
         )
@@ -553,10 +670,27 @@ def main() -> None:
             done_filepaths=done_filepaths,
             max_files=int(args.max_files),
             out_jsonl_path=task_list_path,
+            stop_event=_scan_stop,
         )
         if skipped:
             print(f"[resume] Skipped {skipped:,} already-done file(s).", file=sys.stderr, flush=True)
         print(f"Scan complete: {total_files_enqueued:,} file(s) queued.", file=sys.stderr, flush=True)
+        if _shutdown_requested:
+            # Interrupted during prescan: nothing else to do.
+            if shard_writer is not None:
+                shard_writer.close()
+            if task_list_path:
+                try:
+                    os.remove(task_list_path)
+                except OSError:
+                    pass
+            print("\nDONE (interrupted)")
+            print("base:", args.base)
+            print("files_total:", total_files_enqueued)
+            print("files_ok:", 0)
+            print("files_err:", 0)
+            print("rows_written:", 0)
+            return
 
     print(
         f"Spawning {workers} workers ... (scan-mode={args.scan_mode})",
@@ -567,7 +701,9 @@ def main() -> None:
         print(f"Shard mode: {args.rows_per_shard:,} rows per shard", file=sys.stderr, flush=True)
 
     procs = []
-    for _ in range(workers):
+    for wid in range(workers):
+        worker_output = _worker_output_path(args.output, wid) if args.write_mode == "worker" else ""
+        worker_start_idx = resume_worker_shard_idx.get(wid, 0) if args.write_mode == "worker" else 0
         p = ctx.Process(
             target=worker,
             args=(
@@ -580,6 +716,13 @@ def main() -> None:
                 args.hf_trust_remote_code,
                 args.hf_local_files_only,
                 args.task_timeout,
+                args.no_token_count,
+                args.write_mode,
+                worker_output,
+                args.rows_per_shard if args.write_mode == "worker" else 0,
+                args.batch_size,
+                wid,
+                worker_start_idx,
             ),
         )
         p.start()
@@ -606,7 +749,7 @@ def main() -> None:
         def _producer():
             try:
                 print(f"Scanning {args.base} for *_narratives.json ...", file=sys.stderr, flush=True)
-                for t in iter_narratives_json_files(args.base):
+                for t in iter_narratives_json_files(args.base, _stop_event=_scan_stop):
                     if done_filepaths and t.filepath in done_filepaths:
                         with counts_lock:
                             counts["skipped"] += 1
@@ -628,6 +771,9 @@ def main() -> None:
     ok = 0
     err = 0
     workers_done = 0
+    worker_outputs: list[str] = []
+    worker_rows_written = 0
+    worker_shards = 0
 
     pbar = tqdm(
         total=total_files_enqueued if args.scan_mode == "prescan" else 0,
@@ -664,17 +810,30 @@ def main() -> None:
 
             if kind == "w_done":
                 workers_done += 1
+                if isinstance(payload, dict):
+                    worker_rows_written += int(payload.get("rows_written", 0) or 0)
+                    worker_shards += int(payload.get("shards", 0) or 0)
+                    files = payload.get("output_files")
+                    if isinstance(files, list):
+                        worker_outputs.extend(str(x) for x in files)
                 continue
             if kind == "ok":
                 ok += 1
-                shard_writer.add(payload)
+                if shard_writer is not None:
+                    shard_writer.add(payload)
                 pbar.update(1)
-                pbar.set_postfix(ok=ok, err=err, shards=shard_writer.shard_count)
+                if shard_writer is not None:
+                    pbar.set_postfix(ok=ok, err=err, shards=shard_writer.shard_count)
+                else:
+                    pbar.set_postfix(ok=ok, err=err)
             elif kind == "err":
                 err += 1
                 print(f"\nERROR {payload.get('filepath')}: {payload.get('error')}", file=sys.stderr)
                 pbar.update(1)
-                pbar.set_postfix(ok=ok, err=err, shards=shard_writer.shard_count)
+                if shard_writer is not None:
+                    pbar.set_postfix(ok=ok, err=err, shards=shard_writer.shard_count)
+                else:
+                    pbar.set_postfix(ok=ok, err=err)
 
             # Keep tqdm total close to enqueued so ETA is meaningful (overlap mode).
             if args.scan_mode == "overlap":
@@ -689,7 +848,8 @@ def main() -> None:
     finally:
         pbar.close()
         # Always close the shard writer so completed data is not lost
-        shard_writer.close()
+        if shard_writer is not None:
+            shard_writer.close()
         # Kill remaining workers quickly if shutting down early
         if _shutdown_requested:
             for p in procs:
@@ -713,16 +873,35 @@ def main() -> None:
 
     print(f"\nDONE{interrupted}")
     print("base:", args.base)
-    if args.rows_per_shard > 0:
-        print("output_shards:", shard_writer.shard_count)
-        for fp in shard_writer.output_files():
-            print(f"  {fp}")
+    if args.write_mode == "main":
+        if args.rows_per_shard > 0:
+            assert shard_writer is not None
+            print("output_shards:", shard_writer.shard_count)
+            for fp in shard_writer.output_files():
+                print(f"  {fp}")
+        else:
+            print("output:", args.output)
     else:
-        print("output:", args.output)
+        # Worker mode always produces multiple files.
+        uniq = sorted(set(worker_outputs))
+        if uniq:
+            print("output_files:", len(uniq))
+            for fp in uniq:
+                print(f"  {fp}")
+        else:
+            # Fallback: show the naming pattern
+            print("output_pattern:", _worker_output_glob_pattern(args.output))
     print("files_total:", total_files_enqueued)
     print("files_ok:", ok)
     print("files_err:", err)
-    print("rows_written:", shard_writer.total_rows)
+    if shard_writer is not None:
+        print("rows_written:", shard_writer.total_rows)
+    else:
+        # Best-effort: when interrupted we may not receive all worker summaries.
+        rows_written = worker_rows_written
+        if rows_written == 0 and ok > 0 and workers_done < workers:
+            rows_written = ok
+        print("rows_written:", rows_written)
 
 
 if __name__ == "__main__":
