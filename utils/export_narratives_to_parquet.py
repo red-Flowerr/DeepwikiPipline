@@ -3,6 +3,8 @@ import json
 import multiprocessing as mp
 import os
 import sys
+import threading
+import time
 from dataclasses import dataclass
 
 import pyarrow as pa
@@ -171,7 +173,6 @@ def worker(
     while True:
         task = task_q.get()
         if task is None:
-            task_q.task_done()
             break
 
         try:
@@ -205,7 +206,9 @@ def worker(
                 signal.alarm(0)
             out_q.put(("err", {"folder": task.folder, "filepath": task.filepath, "error": repr(e)}))
         finally:
-            task_q.task_done()
+            if use_alarm:
+                # Ensure a timeout doesn't leak into subsequent tasks.
+                signal.alarm(0)
 
     out_q.put(("w_done", None))
 
@@ -421,7 +424,7 @@ def main() -> None:
     # ------------------------------------------------------------------
     # Resume: scan existing shards for already-processed folders
     # ------------------------------------------------------------------
-    done_folders: set[str] = set()
+    done_filepaths: set[str] = set()
     resume_shard_idx = 0
 
     if args.resume and args.rows_per_shard > 0:
@@ -438,9 +441,10 @@ def main() -> None:
             print(f"[resume] Found {len(existing)} existing shard(s), scanning ...", file=sys.stderr, flush=True)
             for shard_path in existing:
                 try:
-                    t = pq.read_table(shard_path, columns=["folder"])
-                    folders = t.column("folder").to_pylist()
-                    done_folders.update(folders)
+                    t = pq.read_table(shard_path, columns=["filepath"])
+                    paths = t.column("filepath").to_pylist()
+                    # Parquet may contain nulls; guard to keep the set string-only.
+                    done_filepaths.update(p for p in paths if isinstance(p, str))
                 except Exception as e:
                     # Incomplete shard (no footer) — delete it
                     print(
@@ -458,7 +462,7 @@ def main() -> None:
                 except ValueError:
                     pass
             print(
-                f"[resume] {len(done_folders):,} folders already done, "
+                f"[resume] {len(done_filepaths):,} files already done, "
                 f"new shards start at part{resume_shard_idx:04d}",
                 file=sys.stderr,
                 flush=True,
@@ -497,31 +501,13 @@ def main() -> None:
     _signal.signal(_signal.SIGTERM, _graceful_shutdown)
 
     ctx = mp.get_context(args.mp_start) if hasattr(mp, "get_context") else mp
-    task_q = ctx.JoinableQueue()
+    workers = max(1, int(args.workers))
+    # Bounded queue: avoids unbounded memory growth when scanning huge directories.
+    task_q = ctx.Queue(maxsize=max(256, workers * 8))
     out_q = ctx.Queue(maxsize=2000)
 
-    workers = max(1, int(args.workers))
-
-    print(f"Scanning {args.base} for *_narratives.json ...", file=sys.stderr, flush=True)
-    all_tasks = []
-    skipped = 0
-    for t in iter_narratives_json_files(args.base):
-        if done_folders and t.folder in done_folders:
-            skipped += 1
-            continue
-        all_tasks.append(t)
-        if args.max_files and len(all_tasks) >= args.max_files:
-            break
-    total_files_enqueued = len(all_tasks)
-    if skipped:
-        print(
-            f"[resume] Skipped {skipped:,} already-done files, {total_files_enqueued:,} remaining.",
-            file=sys.stderr,
-            flush=True,
-        )
-
     print(
-        f"Spawning {workers} workers for {total_files_enqueued:,} files ...",
+        f"Spawning {workers} workers ... (scanning and processing will overlap)",
         file=sys.stderr,
         flush=True,
     )
@@ -551,33 +537,71 @@ def main() -> None:
         p.start()
         procs.append(p)
 
-    for t in all_tasks:
-        task_q.put(t)
-    del all_tasks
-    for _ in range(workers):
-        task_q.put(None)
+    # ------------------------------------------------------------------
+    # Producer thread: scan base dir and enqueue tasks while workers run.
+    # ------------------------------------------------------------------
+    producer_done = threading.Event()
+    producer_err: list[BaseException] = []
+    counts_lock = threading.Lock()
+    counts = {"enqueued": 0, "skipped": 0}
+
+    def _producer():
+        try:
+            print(f"Scanning {args.base} for *_narratives.json ...", file=sys.stderr, flush=True)
+            for t in iter_narratives_json_files(args.base):
+                if done_filepaths and t.filepath in done_filepaths:
+                    with counts_lock:
+                        counts["skipped"] += 1
+                    continue
+                task_q.put(t)  # blocks if queue full (backpressure)
+                with counts_lock:
+                    counts["enqueued"] += 1
+                    if args.max_files and counts["enqueued"] >= args.max_files:
+                        break
+        except BaseException as e:
+            producer_err.append(e)
+        finally:
+            for _ in range(workers):
+                task_q.put(None)
+            producer_done.set()
+
+    t_prod = threading.Thread(target=_producer, name="task-producer", daemon=True)
+    t_prod.start()
 
     ok = 0
     err = 0
     workers_done = 0
 
     pbar = tqdm(
-        total=total_files_enqueued,
+        total=0,
         desc="Exporting narratives",
         unit="file",
         dynamic_ncols=True,
         disable=False,
     )
+    last_total_update = 0.0
     try:
         while workers_done < workers and not _shutdown_requested:
             try:
                 kind, payload = out_q.get(timeout=5)
             except Exception:
+                # Surface any producer exceptions promptly.
+                if producer_err:
+                    raise RuntimeError("Producer thread failed") from producer_err[0]
                 dead = [p for p in procs if p.exitcode not in (None, 0)]
                 if dead:
                     raise RuntimeError(f"Workers exited non-zero: exitcodes={[p.exitcode for p in dead]}")
                 if all(p.exitcode is not None for p in procs):
                     break
+                # Update tqdm total as we discover more files.
+                now = time.time()
+                if now - last_total_update >= 1.0:
+                    with counts_lock:
+                        enq = counts["enqueued"]
+                    if pbar.total != enq:
+                        pbar.total = enq
+                        pbar.refresh()
+                    last_total_update = now
                 continue
 
             if kind == "w_done":
@@ -593,6 +617,16 @@ def main() -> None:
                 print(f"\nERROR {payload.get('filepath')}: {payload.get('error')}", file=sys.stderr)
                 pbar.update(1)
                 pbar.set_postfix(ok=ok, err=err, shards=shard_writer.shard_count)
+
+            # Keep tqdm total close to enqueued so ETA is meaningful.
+            now = time.time()
+            if now - last_total_update >= 1.0:
+                with counts_lock:
+                    enq = counts["enqueued"]
+                if pbar.total != enq:
+                    pbar.total = enq
+                    pbar.refresh()
+                last_total_update = now
     finally:
         pbar.close()
         # Always close the shard writer so completed data is not lost
@@ -606,6 +640,12 @@ def main() -> None:
             p.join(timeout=10)
 
     interrupted = " (interrupted)" if _shutdown_requested else ""
+    with counts_lock:
+        total_files_enqueued = counts["enqueued"]
+        skipped = counts["skipped"]
+    if skipped:
+        print(f"[resume] Skipped {skipped:,} already-done file(s).", file=sys.stderr, flush=True)
+
     print(f"\nDONE{interrupted}")
     print("base:", args.base)
     if args.rows_per_shard > 0:
