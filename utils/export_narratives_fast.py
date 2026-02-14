@@ -26,6 +26,33 @@ class Task:
     filepath: str
 
 
+def _read_mem_available_bytes() -> int | None:
+    # Linux-only best-effort: used for diagnostics and sane suggestions when workers get SIGKILLed (-9).
+    try:
+        with open("/proc/meminfo", "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        return int(parts[1]) * 1024  # kB -> bytes
+    except Exception:
+        return None
+    return None
+
+
+def _fmt_bytes(n: int | None) -> str:
+    if n is None:
+        return "unknown"
+    unit = 1024.0
+    for suffix in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if n < unit or suffix == "TiB":
+            if suffix == "B":
+                return f"{n}B"
+            return f"{n / unit:.1f}{suffix}"
+        n = int(n / unit)
+    return f"{n}B"
+
+
 def make_schema() -> pa.Schema:
     # Keep the same columns as the original exporter, but do not compute tokens.
     return pa.schema(
@@ -246,6 +273,8 @@ def worker(
     rows_per_shard: int,
     batch_size: int,
     task_timeout: int,
+    max_file_bytes: int,
+    worker_max_vm_bytes: int,
     worker_id: int,
     start_shard_idx: int,
 ):
@@ -280,11 +309,33 @@ def worker(
     # Signal readiness so the parent can detect forkserver/spawn startup issues.
     out_q.put(("w_ready", {"worker_id": worker_id, "pid": os.getpid()}))
 
+    if worker_max_vm_bytes and worker_max_vm_bytes > 0:
+        # Best-effort: cap worker virtual memory so we get a Python-level MemoryError instead of an OOM-kill.
+        try:
+            import resource  # Linux/Unix only
+
+            soft, hard = resource.getrlimit(resource.RLIMIT_AS)
+            new_soft = int(worker_max_vm_bytes)
+            new_hard = int(worker_max_vm_bytes) if hard in (-1, resource.RLIM_INFINITY) else min(int(worker_max_vm_bytes), int(hard))
+            # Only tighten limits; never attempt to raise them.
+            if soft in (-1, resource.RLIM_INFINITY) or new_soft < int(soft):
+                resource.setrlimit(resource.RLIMIT_AS, (new_soft, new_hard))
+        except Exception:
+            # Don't fail the worker if the platform doesn't support it or if limits cannot be set.
+            pass
+
     while True:
         task = task_q.get()
         if task is None:
             break
         try:
+            if max_file_bytes and max_file_bytes > 0:
+                try:
+                    st = os.stat(task.filepath)
+                    if st.st_size > max_file_bytes:
+                        raise ValueError(f"file too large: {st.st_size} bytes > limit {max_file_bytes} bytes")
+                except FileNotFoundError:
+                    raise
             if use_alarm:
                 signal.alarm(task_timeout)
             repo, narrative_text, total, missing = parse_one_file(task.filepath, concat_sep=concat_sep)
@@ -304,6 +355,8 @@ def worker(
             out_q.put(("ok", {"filepath": task.filepath}))
         except _TaskTimeout:
             out_q.put(("err", {"folder": task.folder, "filepath": task.filepath, "error": f"timeout ({task_timeout}s)"}))
+        except MemoryError:
+            out_q.put(("err", {"folder": task.folder, "filepath": task.filepath, "error": "MemoryError (worker OOM)"}))
         except KeyboardInterrupt:
             break
         except Exception as e:
@@ -340,6 +393,18 @@ def main() -> None:
         help="Seconds to wait for workers to finish after SIGINT/SIGTERM before terminating them.",
     )
     ap.add_argument("--task-timeout", type=int, default=0, help="Per-file timeout seconds (0 disables).")
+    ap.add_argument(
+        "--max-file-mb",
+        type=int,
+        default=0,
+        help="Skip files larger than this many MiB (0 disables). Helps avoid worker OOM-kills on giant JSON files.",
+    )
+    ap.add_argument(
+        "--worker-max-vm-mb",
+        type=int,
+        default=0,
+        help="Best-effort cap for worker virtual memory (MiB). 0 disables. Can turn OOM-kills into recoverable MemoryError.",
+    )
     ap.add_argument("--max-files", type=int, default=0)
     ap.add_argument("--resume", action="store_true", default=False)
     args = ap.parse_args()
@@ -426,6 +491,9 @@ def main() -> None:
 
     print(f"Spawning {workers} workers ... (mp-start={args.mp_start})", file=sys.stderr, flush=True)
     print(f"Shard mode: {args.rows_per_shard:,} rows per shard", file=sys.stderr, flush=True)
+    mem_avail = _read_mem_available_bytes()
+    if mem_avail is not None:
+        print(f"MemAvailable: {_fmt_bytes(mem_avail)}", file=sys.stderr, flush=True)
 
     # Create output directory once in the parent (avoid stampeding os.makedirs on remote FS).
     out_dir = os.path.dirname(args.output) or "."
@@ -443,6 +511,8 @@ def main() -> None:
                 int(args.rows_per_shard),
                 int(args.batch_size),
                 int(args.task_timeout),
+                int(args.max_file_mb) * 1024 * 1024 if int(args.max_file_mb) > 0 else 0,
+                int(args.worker_max_vm_mb) * 1024 * 1024 if int(args.worker_max_vm_mb) > 0 else 0,
                 wid,
                 int(resume_worker_shard_idx.get(wid, 0)),
             ),
@@ -509,7 +579,19 @@ def main() -> None:
             except Exception:
                 dead = [p for p in procs if p.exitcode not in (None, 0)]
                 if dead:
-                    raise RuntimeError(f"Workers exited non-zero: exitcodes={[p.exitcode for p in dead]}")
+                    exitcodes = [p.exitcode for p in dead]
+                    pids = [p.pid for p in dead]
+                    oom_hint = ""
+                    if any(ec == -9 for ec in exitcodes):
+                        oom_hint = (
+                            "\nLikely SIGKILL/OOM. Try fewer workers (e.g. --workers 1 or 2), "
+                            "or set --max-file-mb to skip giant JSONs, or set --worker-max-vm-mb to cap memory. "
+                            "If partial output exists, rerun with --resume."
+                        )
+                    raise RuntimeError(
+                        f"Workers exited non-zero: exitcodes={exitcodes}, pids={pids}. "
+                        f"MemAvailable={_fmt_bytes(mem_avail)}.{oom_hint}"
+                    )
                 if all(p.exitcode is not None for p in procs):
                     break
                 continue

@@ -321,11 +321,23 @@ python utils/export_narratives_fast.py \
   --rows-per-shard 5000 \
   --batch-size 8 \
   --task-timeout 0 \
+  --max-file-mb 0 \
+  --worker-max-vm-mb 0 \
   --resume \
   --queue-maxsize 0
 ```
 
 输出为多文件：`repo_level_narratives.worker*.part*.parquet`（每个 worker 自己写 shard）。
+
+##### 4.1.1.1 GB 级 *_narratives.json 的处理建议
+
+如果存在单个 `*_narratives.json` 达到 GB 级（例如 2GB），`export_narratives_fast.py` 由于需要整文件 JSON 反序列化 + 拼接，
+很容易触发 worker 被系统 OOM-kill（exitcode `-9`）。推荐做法：
+
+- 上游先把大 JSON array 拆成多个小文件（仍以 `_narratives.json` 结尾，export 扫描能识别）：
+  - `python utils/split_narratives_json.py --input /path/to/foo_narratives.json --rows-per-part 50000`
+  - 或加大小上限：`--max-part-mb 256`
+- 导出时先保守并发（例如 `--workers 1` 或 `--workers 2`），并保持 `--resume` 方便断点续跑。
 
 #### 4.2 追加 token 列
 
