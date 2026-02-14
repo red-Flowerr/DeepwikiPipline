@@ -249,6 +249,24 @@ def main() -> None:
         default=False,
         help="Skip input files already completed in this output dir (uses output-dir/_resume/done markers).",
     )
+    ap.add_argument(
+        "--shard-index",
+        type=int,
+        default=0,
+        help="Process only a shard of input files for parallel runs. Requires --num-shards > 1.",
+    )
+    ap.add_argument(
+        "--num-shards",
+        type=int,
+        default=1,
+        help="Number of shards to split input files into for parallel runs (default: %(default)s).",
+    )
+    ap.add_argument(
+        "--claim",
+        action="store_true",
+        default=False,
+        help="Create a per-file claim marker to avoid duplicate work when multiple processes share the same output dir.",
+    )
 
     ap.add_argument("--tokenizer-backend", default="tiktoken", choices=["tiktoken", "hf"])
     ap.add_argument("--encoding", default="cl100k_base")
@@ -261,6 +279,13 @@ def main() -> None:
     files = sorted(glob.glob(args.input_glob))
     if not files:
         raise SystemExit(f"No input files matched: {args.input_glob!r}")
+
+    if int(args.num_shards) < 1:
+        raise SystemExit("--num-shards must be >= 1")
+    if int(args.num_shards) == 1 and int(args.shard_index) != 0:
+        raise SystemExit("--shard-index must be 0 when --num-shards=1")
+    if not (0 <= int(args.shard_index) < int(args.num_shards)):
+        raise SystemExit("--shard-index must be in [0, --num-shards)")
 
     count_tokens = make_token_counter(
         tokenizer_backend=args.tokenizer_backend,
@@ -282,9 +307,12 @@ def main() -> None:
     resume_dir = os.path.join(args.output_dir, "_resume")
     done_dir = os.path.join(resume_dir, "done")
     tmp_dir = os.path.join(resume_dir, "tmp")
+    claim_dir = os.path.join(resume_dir, "claim")
     if args.resume:
         _ensure_dir(done_dir)
         _ensure_dir(tmp_dir)
+        if args.claim:
+            _ensure_dir(claim_dir)
 
     run_sig = _resume_signature(args)
 
@@ -300,6 +328,12 @@ def main() -> None:
     pbar = tqdm(total=len(files), desc="Tokenizing parquet files", unit="file", dynamic_ncols=True)
     try:
         for fp in files:
+            # Deterministic sharding for parallel runs.
+            if int(args.num_shards) > 1:
+                h = int(sha1(fp.encode("utf-8", errors="replace")).hexdigest()[:8], 16)
+                if (h % int(args.num_shards)) != int(args.shard_index):
+                    continue
+
             fid = _file_id(fp)
             st = None
             try:
@@ -337,6 +371,29 @@ def main() -> None:
                         pbar.update(1)
                         pbar.set_postfix(errors=stats["errors"], skipped=stats["skipped_done"])
                         continue
+
+            claim_path = os.path.join(claim_dir, f"{fid}.json") if (args.resume and args.claim) else ""
+            if claim_path:
+                # Best-effort: atomically claim the file; if it exists, someone else is/was processing it.
+                try:
+                    payload = {
+                        "input": fp,
+                        "file_id": fid,
+                        "pid": os.getpid(),
+                        "started": time.time(),
+                        "resume_signature": run_sig,
+                    }
+                    fd = os.open(claim_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                    with os.fdopen(fd, "w", encoding="utf-8") as f:
+                        json.dump(payload, f, ensure_ascii=False)
+                except FileExistsError:
+                    print(f"[skip] {os.path.basename(fp)} (claimed)", file=sys.stderr, flush=True)
+                    stats["skipped_done"] += 1
+                    pbar.update(1)
+                    pbar.set_postfix(errors=stats["errors"], skipped=stats["skipped_done"])
+                    continue
+                except OSError as e:
+                    print(f"[warn] claim failed for {fp}: {e!r}", file=sys.stderr, flush=True)
 
             pf = pq.ParquetFile(fp)
             if schema is None:
@@ -504,6 +561,12 @@ def main() -> None:
                     except OSError as e:
                         stats["errors"] += 1
                         print(f"\nERROR writing done marker {done_path}: {e!r}", file=sys.stderr, flush=True)
+                    finally:
+                        if claim_path:
+                            try:
+                                os.remove(claim_path)
+                            except OSError:
+                                pass
 
                 elapsed = time.time() - file_t_start
                 if elapsed > 0:

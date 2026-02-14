@@ -350,6 +350,32 @@ python utils/add_narrative_tokens_to_parquet.py \
   --tokenizer-backend tiktoken --encoding cl100k_base
 ```
 
+#### 4.3 Tokenize + 分桶（支持断点续跑 + 多进程分片）
+
+推荐用流式脚本直接对 `export_narratives_fast.py` 的多文件输出做 token 计数并分桶（避免一次性加载全量 Parquet）：
+
+```bash
+python utils/tokenize_and_bucket_parquet.py \
+  --input-glob "<output_path>/repo_level_narratives.worker*.part*.parquet" \
+  --output-dir "<output_path>/buckets_0213" \
+  --tokenizer-backend tiktoken --encoding cl100k_base \
+  --batch-size 1 --write-batch 8 \
+  --resume --claim \
+  --num-shards 32 --shard-index 0
+```
+
+说明：
+- 多进程并行：启动 `--shard-index=0..31` 共 32 个进程即可吃满多核。
+- 断点续跑：`--resume` 会跳过已完成输入；`--claim` 避免多个进程重复处理同一输入文件。
+
+分桶完成后可一键汇总（按桶统计 rows / tokens_sum）：
+
+```bash
+python utils/summarize_bucket_run.py \
+  --output-dir "<output_path>/buckets_0213" \
+  --write-json "<output_path>/buckets_0213/summary.json"
+```
+
 #### 4.2.1 统计 token 并分桶（流式，适合超大数据）
 
 把落盘后的 Parquet shards 流式读入，计算 `narrative_tokens` 并按 bucket 输出到不同目录（不会一次性把全部数据读进内存）：
