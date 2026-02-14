@@ -199,6 +199,12 @@ def main() -> None:
     ap.add_argument("--write-batch", type=int, default=8, help="Rows buffered before writing per bucket (default: %(default)s)")
     ap.add_argument("--compression", default="zstd")
     ap.add_argument("--keep-overflow", action="store_true", default=False, help="Keep rows >= 2M tokens in 'over_2M'")
+    ap.add_argument(
+        "--heartbeat-secs",
+        type=int,
+        default=30,
+        help="Print periodic progress while processing a file (0 disables). Default: %(default)s",
+    )
 
     ap.add_argument("--tokenizer-backend", default="tiktoken", choices=["tiktoken", "hf"])
     ap.add_argument("--encoding", default="cl100k_base")
@@ -253,6 +259,16 @@ def main() -> None:
                         compression=args.compression,
                     )
 
+            file_rows = pf.metadata.num_rows if pf.metadata is not None else None
+            file_rows_done = 0
+            file_tokens_done = 0
+            file_t_start = time.time()
+            next_hb = file_t_start + max(1, int(args.heartbeat_secs)) if int(args.heartbeat_secs) > 0 else None
+            if file_rows is not None:
+                print(f"[file] {os.path.basename(fp)} rows={file_rows:,}", file=sys.stderr, flush=True)
+            else:
+                print(f"[file] {os.path.basename(fp)}", file=sys.stderr, flush=True)
+
             try:
                 for batch in pf.iter_batches(batch_size=int(args.batch_size)):
                     rb = pa.RecordBatch.from_struct_array(
@@ -271,6 +287,28 @@ def main() -> None:
                             tok = int(count_tokens(s))
 
                         row[args.tokens_col] = tok
+                        file_rows_done += 1
+                        file_tokens_done += tok
+
+                        if next_hb is not None and time.time() >= next_hb:
+                            elapsed = time.time() - file_t_start
+                            rps = (file_rows_done / elapsed) if elapsed > 0 else 0.0
+                            tps = (file_tokens_done / elapsed) if elapsed > 0 else 0.0
+                            if file_rows is not None:
+                                pct = (file_rows_done / file_rows * 100.0) if file_rows else 0.0
+                                print(
+                                    f"[hb] {os.path.basename(fp)} {file_rows_done:,}/{file_rows:,} ({pct:.1f}%) "
+                                    f"rows rps={rps:.2f} tok/s={tps:,.0f}",
+                                    file=sys.stderr,
+                                    flush=True,
+                                )
+                            else:
+                                print(
+                                    f"[hb] {os.path.basename(fp)} rows={file_rows_done:,} rps={rps:.2f} tok/s={tps:,.0f}",
+                                    file=sys.stderr,
+                                    flush=True,
+                                )
+                            next_hb = time.time() + int(args.heartbeat_secs)
 
                         bucket_name = None
                         for b in buckets:
@@ -293,6 +331,15 @@ def main() -> None:
             except Exception as e:
                 stats["errors"] += 1
                 print(f"\nERROR reading {fp}: {e!r}", file=sys.stderr, flush=True)
+            finally:
+                elapsed = time.time() - file_t_start
+                if elapsed > 0:
+                    print(
+                        f"[file_done] {os.path.basename(fp)} rows={file_rows_done:,} seconds={elapsed:.1f} "
+                        f"rps={(file_rows_done/elapsed):.2f}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
 
             pbar.update(1)
             pbar.set_postfix(errors=stats["errors"])
@@ -329,4 +376,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
