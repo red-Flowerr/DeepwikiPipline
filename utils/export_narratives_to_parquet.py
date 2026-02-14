@@ -291,10 +291,29 @@ def worker(
                 out_q.put(("ok", row))
         except _TaskTimeout:
             out_q.put(("err", {"folder": task.folder, "filepath": task.filepath, "error": f"timeout ({task_timeout}s)"}))
+        except KeyboardInterrupt:
+            # Can happen if the environment delivers SIGINT directly to workers (spawn) or before handlers install.
+            # Exit cleanly without spewing tracebacks.
+            break
         except Exception as e:
             if use_alarm:
                 signal.alarm(0)
             out_q.put(("err", {"folder": task.folder, "filepath": task.filepath, "error": repr(e)}))
+        except BaseException as e:
+            # Last-resort: keep the parent informed, then stop this worker.
+            if use_alarm:
+                signal.alarm(0)
+            out_q.put(
+                (
+                    "err",
+                    {
+                        "folder": task.folder,
+                        "filepath": task.filepath,
+                        "error": f"fatal: {type(e).__name__}: {e}",
+                    },
+                )
+            )
+            break
         finally:
             if use_alarm:
                 # Ensure a timeout doesn't leak into subsequent tasks.
