@@ -308,6 +308,25 @@ python utils/export_narratives_to_parquet.py \
   --workers 16 --mp-start spawn
 ```
 
+#### 4.1.1 导出 narrative 到 Parquet（极速版：不算 token）
+
+对于超长 narrative（例如单条 ~1M token），token 计数会成为主要耗时。建议先落盘 narrative，再做离线 token 统计与分桶：
+
+```bash
+python utils/export_narratives_fast.py \
+  --base <deepwiki_data_dir> \
+  --output <output_path>/repo_level_narratives.parquet \
+  --workers 16 \
+  --mp-start forkserver \
+  --rows-per-shard 5000 \
+  --batch-size 8 \
+  --task-timeout 0 \
+  --resume \
+  --queue-maxsize 0
+```
+
+输出为多文件：`repo_level_narratives.worker*.part*.parquet`（每个 worker 自己写 shard）。
+
 #### 4.2 追加 token 列
 
 在已有 Parquet 上追加 `narrative_tokens` 列（无需重新拼接 narrative）：
@@ -318,6 +337,28 @@ python utils/add_narrative_tokens_to_parquet.py \
   --output <output>.with_tokens.parquet \
   --tokenizer-backend tiktoken --encoding cl100k_base
 ```
+
+#### 4.2.1 统计 token 并分桶（流式，适合超大数据）
+
+把落盘后的 Parquet shards 流式读入，计算 `narrative_tokens` 并按 bucket 输出到不同目录（不会一次性把全部数据读进内存）：
+
+```bash
+python utils/tokenize_and_bucket_parquet.py \
+  --input-glob "<output_path>/repo_level_narratives.worker*.part*.parquet" \
+  --output-dir "<output_path>/buckets_repo_level_narratives" \
+  --tokenizer-backend tiktoken \
+  --encoding cl100k_base \
+  --batch-size 1 \
+  --write-batch 8 \
+  --rows-per-shard 200
+```
+
+默认 buckets：
+- `<128k`
+- `128k–512k`
+- `512k–2M`
+
+如需保留 `>=2M`，加 `--keep-overflow`（输出到 `over_2M/`）；否则会计入 `skipped_overflow`。
 
 #### 4.3 导出 repo → token 数 JSONL
 
