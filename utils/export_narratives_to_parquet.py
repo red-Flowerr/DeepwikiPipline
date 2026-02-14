@@ -3,6 +3,7 @@ import json
 import multiprocessing as mp
 import os
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -135,6 +136,28 @@ def parse_one_file(filepath: str, concat_sep: str):
 
     narrative_text = concat_sep.join(narratives)
     return repo, narrative_text, len(obj), missing
+
+
+def prescan_tasks_to_jsonl(
+    *,
+    base_dir: str,
+    done_filepaths: set[str],
+    max_files: int,
+    out_jsonl_path: str,
+) -> tuple[int, int]:
+    """Scan base_dir and write tasks as JSONL. Returns (enqueued, skipped)."""
+    enqueued = 0
+    skipped = 0
+    with open(out_jsonl_path, "w", encoding="utf-8") as f:
+        for t in iter_narratives_json_files(base_dir):
+            if done_filepaths and t.filepath in done_filepaths:
+                skipped += 1
+                continue
+            f.write(json.dumps({"folder": t.folder, "filepath": t.filepath}, ensure_ascii=False) + "\n")
+            enqueued += 1
+            if max_files and enqueued >= max_files:
+                break
+    return enqueued, skipped
 
 
 class _TaskTimeout(Exception):
@@ -372,6 +395,17 @@ def main() -> None:
     ap.add_argument("--workers", type=int, default=DEFAULT_WORKERS, help="Worker processes (default: %(default)s)")
     ap.add_argument("--mp-start", default="spawn", choices=["spawn", "fork", "forkserver"])
     ap.add_argument("--max-files", type=int, default=0, help="Only process first N files (debug). 0 = all.")
+    ap.add_argument(
+        "--scan-mode",
+        default="prescan",
+        choices=["prescan", "overlap"],
+        help=(
+            "How to scan for input files. "
+            "'prescan' scans first and then processes (less IO contention, stable progress total). "
+            "'overlap' scans and processes concurrently (lower memory, can be faster on local disks). "
+            "(default: %(default)s)"
+        ),
+    )
     ap.add_argument("--tokenizer-backend", default="tiktoken", choices=["tiktoken", "hf"])
     ap.add_argument("--encoding", default=DEFAULT_ENCODING, help="tiktoken encoding name (default: %(default)s)")
     ap.add_argument("--hf-model", default="", help="HF model name/path (required when --tokenizer-backend=hf)")
@@ -506,17 +540,31 @@ def main() -> None:
     task_q = ctx.Queue(maxsize=max(256, workers * 8))
     out_q = ctx.Queue(maxsize=2000)
 
+    skipped = 0
+    total_files_enqueued = 0
+    task_list_path: str | None = None
+
+    if args.scan_mode == "prescan":
+        fd, task_list_path = tempfile.mkstemp(prefix="deepwiki_tasks_", suffix=".jsonl")
+        os.close(fd)
+        print(f"Scanning {args.base} for *_narratives.json ...", file=sys.stderr, flush=True)
+        total_files_enqueued, skipped = prescan_tasks_to_jsonl(
+            base_dir=args.base,
+            done_filepaths=done_filepaths,
+            max_files=int(args.max_files),
+            out_jsonl_path=task_list_path,
+        )
+        if skipped:
+            print(f"[resume] Skipped {skipped:,} already-done file(s).", file=sys.stderr, flush=True)
+        print(f"Scan complete: {total_files_enqueued:,} file(s) queued.", file=sys.stderr, flush=True)
+
     print(
-        f"Spawning {workers} workers ... (scanning and processing will overlap)",
+        f"Spawning {workers} workers ... (scan-mode={args.scan_mode})",
         file=sys.stderr,
         flush=True,
     )
     if args.rows_per_shard > 0:
-        print(
-            f"Shard mode: {args.rows_per_shard:,} rows per shard",
-            file=sys.stderr,
-            flush=True,
-        )
+        print(f"Shard mode: {args.rows_per_shard:,} rows per shard", file=sys.stderr, flush=True)
 
     procs = []
     for _ in range(workers):
@@ -537,71 +585,81 @@ def main() -> None:
         p.start()
         procs.append(p)
 
-    # ------------------------------------------------------------------
-    # Producer thread: scan base dir and enqueue tasks while workers run.
-    # ------------------------------------------------------------------
-    producer_done = threading.Event()
-    producer_err: list[BaseException] = []
-    counts_lock = threading.Lock()
-    counts = {"enqueued": 0, "skipped": 0}
-
-    def _producer():
-        try:
-            print(f"Scanning {args.base} for *_narratives.json ...", file=sys.stderr, flush=True)
-            for t in iter_narratives_json_files(args.base):
-                if done_filepaths and t.filepath in done_filepaths:
-                    with counts_lock:
-                        counts["skipped"] += 1
-                    continue
-                task_q.put(t)  # blocks if queue full (backpressure)
-                with counts_lock:
-                    counts["enqueued"] += 1
-                    if args.max_files and counts["enqueued"] >= args.max_files:
+    if args.scan_mode == "prescan":
+        if task_list_path:
+            with open(task_list_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if _shutdown_requested:
                         break
-        except BaseException as e:
-            producer_err.append(e)
-        finally:
-            for _ in range(workers):
-                task_q.put(None)
-            producer_done.set()
+                    item = json.loads(line)
+                    task_q.put(Task(folder=item["folder"], filepath=item["filepath"]))
+        for _ in range(workers):
+            task_q.put(None)
+    else:
+        # ------------------------------------------------------------------
+        # Overlap mode: scan base dir and enqueue tasks while workers run.
+        # ------------------------------------------------------------------
+        producer_err: list[BaseException] = []
+        counts_lock = threading.Lock()
+        counts = {"enqueued": 0, "skipped": 0}
 
-    t_prod = threading.Thread(target=_producer, name="task-producer", daemon=True)
-    t_prod.start()
+        def _producer():
+            try:
+                print(f"Scanning {args.base} for *_narratives.json ...", file=sys.stderr, flush=True)
+                for t in iter_narratives_json_files(args.base):
+                    if done_filepaths and t.filepath in done_filepaths:
+                        with counts_lock:
+                            counts["skipped"] += 1
+                        continue
+                    task_q.put(t)  # blocks if queue full (backpressure)
+                    with counts_lock:
+                        counts["enqueued"] += 1
+                        if args.max_files and counts["enqueued"] >= args.max_files:
+                            break
+            except BaseException as e:
+                producer_err.append(e)
+            finally:
+                for _ in range(workers):
+                    task_q.put(None)
+
+        t_prod = threading.Thread(target=_producer, name="task-producer", daemon=True)
+        t_prod.start()
 
     ok = 0
     err = 0
     workers_done = 0
 
     pbar = tqdm(
-        total=0,
+        total=total_files_enqueued if args.scan_mode == "prescan" else 0,
         desc="Exporting narratives",
         unit="file",
         dynamic_ncols=True,
         disable=False,
     )
-    last_total_update = 0.0
+    last_total_update = 0.0  # overlap mode only
     try:
         while workers_done < workers and not _shutdown_requested:
             try:
                 kind, payload = out_q.get(timeout=5)
             except Exception:
-                # Surface any producer exceptions promptly.
-                if producer_err:
+                # Surface any producer exceptions promptly (overlap mode).
+                if args.scan_mode == "overlap" and producer_err:
                     raise RuntimeError("Producer thread failed") from producer_err[0]
                 dead = [p for p in procs if p.exitcode not in (None, 0)]
                 if dead:
                     raise RuntimeError(f"Workers exited non-zero: exitcodes={[p.exitcode for p in dead]}")
                 if all(p.exitcode is not None for p in procs):
                     break
-                # Update tqdm total as we discover more files.
-                now = time.time()
-                if now - last_total_update >= 1.0:
-                    with counts_lock:
-                        enq = counts["enqueued"]
-                    if pbar.total != enq:
-                        pbar.total = enq
-                        pbar.refresh()
-                    last_total_update = now
+                # Update tqdm total as we discover more files (overlap mode only).
+                if args.scan_mode == "overlap":
+                    now = time.time()
+                    if now - last_total_update >= 1.0:
+                        with counts_lock:
+                            enq = counts["enqueued"]
+                        if pbar.total != enq:
+                            pbar.total = enq
+                            pbar.refresh()
+                        last_total_update = now
                 continue
 
             if kind == "w_done":
@@ -618,15 +676,16 @@ def main() -> None:
                 pbar.update(1)
                 pbar.set_postfix(ok=ok, err=err, shards=shard_writer.shard_count)
 
-            # Keep tqdm total close to enqueued so ETA is meaningful.
-            now = time.time()
-            if now - last_total_update >= 1.0:
-                with counts_lock:
-                    enq = counts["enqueued"]
-                if pbar.total != enq:
-                    pbar.total = enq
-                    pbar.refresh()
-                last_total_update = now
+            # Keep tqdm total close to enqueued so ETA is meaningful (overlap mode).
+            if args.scan_mode == "overlap":
+                now = time.time()
+                if now - last_total_update >= 1.0:
+                    with counts_lock:
+                        enq = counts["enqueued"]
+                    if pbar.total != enq:
+                        pbar.total = enq
+                        pbar.refresh()
+                    last_total_update = now
     finally:
         pbar.close()
         # Always close the shard writer so completed data is not lost
@@ -640,11 +699,17 @@ def main() -> None:
             p.join(timeout=10)
 
     interrupted = " (interrupted)" if _shutdown_requested else ""
-    with counts_lock:
-        total_files_enqueued = counts["enqueued"]
-        skipped = counts["skipped"]
-    if skipped:
-        print(f"[resume] Skipped {skipped:,} already-done file(s).", file=sys.stderr, flush=True)
+    if args.scan_mode == "overlap":
+        with counts_lock:
+            total_files_enqueued = counts["enqueued"]
+            skipped = counts["skipped"]
+        if skipped:
+            print(f"[resume] Skipped {skipped:,} already-done file(s).", file=sys.stderr, flush=True)
+    if task_list_path:
+        try:
+            os.remove(task_list_path)
+        except OSError:
+            pass
 
     print(f"\nDONE{interrupted}")
     print("base:", args.base)
