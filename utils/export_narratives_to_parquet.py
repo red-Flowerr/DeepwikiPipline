@@ -263,6 +263,13 @@ def worker(
         if task is None:
             break
 
+        # Defensive: ensure no previous alarm leaks into this iteration.
+        if use_alarm:
+            try:
+                signal.alarm(0)
+            except Exception:
+                pass
+
         try:
             if use_alarm:
                 signal.alarm(task_timeout)
@@ -294,6 +301,11 @@ def worker(
         except KeyboardInterrupt:
             # Can happen if the environment delivers SIGINT directly to workers (spawn) or before handlers install.
             # Exit cleanly without spewing tracebacks.
+            if use_alarm:
+                try:
+                    signal.alarm(0)
+                except Exception:
+                    pass
             break
         except Exception as e:
             if use_alarm:
