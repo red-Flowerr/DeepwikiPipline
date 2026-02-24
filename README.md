@@ -437,6 +437,7 @@ python utils/export_repo_tokens_jsonl.py \
 | `utils/export_narratives_to_parquet.py` | `*_narratives.json` → repo 级 Parquet（含 token 计数） |
 | `utils/add_narrative_tokens_to_parquet.py` | 给已有 Parquet 追加 `narrative_tokens` 列 |
 | `utils/export_repo_tokens_jsonl.py` | Parquet → repo:tokens JSONL |
+| `utils/convert_midtrain_parquet.py` | 训练 parquet → midtrain parquet（重算 `token_count`） |
 | `utils/extract_repo_hdfs_map.py` | 构建 `repo_name → hdfs_path` 映射 JSON |
 | `utils/extract_repo_index.py` | 提取 Sources 引用索引 → `repo_indices.json` |
 | `utils/concat_narratives.py` | 多 narrative JSON 拼接为单文本 |
@@ -454,6 +455,33 @@ python utils/export_repo_tokens_jsonl.py \
 ---
 
 ## 输出数据 Schema
+
+## Midtrain 数据转换
+
+将现有训练 Parquet 转换为 midtrain 所需 Schema，并用指定 tokenizer 重新计算 `token_count`。
+
+输出 Schema：
+
+- `meta`：struct，包含 `docid` / `chunk_id` / `source`
+- `content_split`：文本内容
+- `token_count`：使用 tokenizer 对 `content_split` 计算得到的 token 数量
+
+示例（按原目录结构输出）：
+
+```bash
+python utils/convert_midtrain_parquet.py \
+  --input-root /mnt/hdfs/byte_data_seed_wl_write/user/xingtianshun/deepwiki_handover/0213_training_parquet \
+  --output-root /mnt/hdfs/byte_data_seed_wl_write/user/xingtianshun/deepwiki_handover/0224_mt_train_parquet \
+  --tokenizer /mnt/hdfs/byte_data_seed_wl/user/fangjunjie.99/tokenizers/bbpe155k-v6.4.3-ml.pret_v5.7_20251015 \
+  --workers 16 --batch-size 64
+```
+
+常用可选参数：
+
+- `--source xxx`：覆盖输出 `meta.source`
+- `--subdirs under_128k,128k_512k,512k_2M`：只处理指定子目录
+- `--max-files N`：小规模验证用
+
 
 ### `*_narratives.json`（section 级，per repo）
 

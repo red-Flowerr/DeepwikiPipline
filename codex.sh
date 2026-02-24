@@ -11,5 +11,6 @@ nvm install 20
 npm install -g @openai/codex@latest
 npm set registry https://bnpm.byted.org
 # npx @byted/codex-bridge@latest --model glm-4.7 -y
+npx @byted/ship@latest login
 npx @byted/codex-bridge@latest --model gpt-5.2
 # codex --sandbox danger-full-access
